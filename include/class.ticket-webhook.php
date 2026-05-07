@@ -122,7 +122,12 @@ class TicketWebhookPlugin extends Plugin {
         $staffUrl = null;
         if ($ost && $ost->getConfig()) {
             $baseUrl = rtrim($ost->getConfig()->getBaseUrl(), '/');
-            $callbackUrl = $baseUrl . '/api/hermes/note';
+            // Route is registered through osTicket's API front controller
+            // (api/http.php). Some installations do not enable rewrite rules
+            // for pretty /api/<route> URLs, especially when osTicket is
+            // installed in a subdirectory. Use the explicit front-controller
+            // URL so the callback works consistently.
+            $callbackUrl = $baseUrl . '/api/http.php/hermes/note';
             $staffUrl = $baseUrl . '/scp/tickets.php?id=' . $ticket->getId();
         }
 
@@ -318,7 +323,7 @@ class TicketWebhookPlugin extends Plugin {
     }
 
     // ------------------------------------------------------------------
-    //  Hermes callback API: POST /api/hermes/note
+    //  Hermes callback API: POST /api/http.php/hermes/note
     // ------------------------------------------------------------------
 
     function registerHermesApiRoutes($dispatcher) {
@@ -506,7 +511,7 @@ class TicketWebhookConfig extends PluginConfig {
             )),
             'hermes-secret' => new PasswordField(array(
                 'label'    => 'Hermes Shared Secret',
-                'hint'     => 'Shared secret expected from Hermes on callback POST /api/hermes/note. Hermes must send it as X-Hermes-Secret.',
+                'hint'     => 'Shared secret expected from Hermes on callback POST /api/http.php/hermes/note. Hermes must send it as X-Hermes-Secret.',
                 'required' => true,
                 'widget'   => 'PasswordWidget',
                 'configuration' => array('size' => 64, 'length' => 256),
