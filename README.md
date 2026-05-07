@@ -1,168 +1,202 @@
-# osTicket Ticket Webhook Plugin
+# osTicket Hermes Agent Plugin
 
-A plugin for [osTicket](https://osticket.com/) that sends an HTTP POST webhook with JSON ticket details whenever a new ticket is created. Supports department filtering, HTTP Basic Auth, multi-instance configuration, and reverse-proxy environments.
+Fork of [`sitkowsp/osT-TTW`](https://github.com/sitkowsp/osT-TTW), adapted for the Pearl/MacWay Hermes Agent workflow on **osTicket 1.18.x**.
 
-## Features
+The plugin keeps the useful base behaviour from osT-TTW — outbound JSON webhook on `ticket.created`, department filtering, Basic Auth, custom headers, reverse-proxy DNS override — and adds the Hermes-specific loop:
 
-- **Webhook on ticket creation** -- sends a JSON POST request with full ticket details
-- **Department filtering** -- trigger only for selected departments, or all
-- **HTTP Basic Auth** -- optional username/password authentication
-- **Multi-instance** -- create multiple instances with different URLs, credentials, and department filters
-- **Reverse-proxy aware** -- DNS resolve override for environments where the webhook domain points to the same server
-- **Custom headers** -- add an extra HTTP header per instance (e.g. API key)
-- **Debug logging** -- optional per-instance logging to `webhook.log`
+1. osTicket creates a ticket.
+2. The plugin sends a short-timeout JSON webhook to Hermes Agent.
+3. Hermes analyses the ticket asynchronously.
+4. Hermes calls back osTicket on `POST /api/hermes/note`.
+5. The plugin adds Hermes' proposal as an **internal note only**.
+
+It never sends an automatic reply to the customer.
 
 ## Requirements
 
-- osTicket **1.18+ < 2.00**
+- osTicket **1.18.x** — validated against the 1.18.2 source API
 - PHP **7.4+**
 - PHP cURL extension (`php-curl`)
+- One active plugin instance with a shared secret
 
 ## Installation
 
-1. Download or clone this repository into your osTicket plugins directory:
+Clone or copy this repository into your osTicket plugin directory:
 
-   ```bash
-   cd /path/to/osticket/include/plugins
-   git clone https://github.com/<your-org>/osticket-ticket-webhook.git ticket-webhook
-   ```
+```bash
+cd /path/to/osticket/include/plugins
+git clone https://github.com/Aior/osticket-hermes-agent-plugin.git osticket-hermes-agent-plugin
+```
 
-   Or copy the files manually so the structure looks like:
+Expected structure:
 
-   ```
-   include/plugins/ticket-webhook/
-   ├── plugin.php
-   └── include/
-       └── class.ticket-webhook.php
-   ```
+```text
+include/plugins/osticket-hermes-agent-plugin/
+├── plugin.php
+└── include/
+    └── class.ticket-webhook.php
+```
 
-2. In osTicket, go to **Admin Panel > Manage > Plugins > Add New Plugin**.
+Then in osTicket:
 
-3. Select **Ticket Webhook** from the list and click **Install**.
-
-4. The plugin is now installed but needs at least one **instance** to be configured.
+1. **Admin Panel > Manage > Plugins > Add New Plugin**
+2. Install **Hermes Agent Ticket Webhook**
+3. Open the plugin and add an **active instance**
+4. Configure the fields below
 
 ## Configuration
 
-### Creating an instance
-
-1. Go to **Admin Panel > Manage > Plugins > Ticket Webhook**.
-2. Click **Add New Instance**.
-3. Give it a name (e.g. "Production Webhook") and fill in the configuration.
-4. Check **Active** to enable the instance.
-
-### Configuration fields
-
-#### Webhook Settings
+### Webhook Settings
 
 | Field | Description |
 |---|---|
 | **Enable Webhook** | Master on/off toggle for this instance. |
-| **Webhook URL** | The full URL that receives the POST request (e.g. `https://example.com/api/webhook`). |
+| **Hermes Webhook URL** | Endpoint that receives outbound `ticket.created` events. Example: `https://hermes.example.com/webhook/osticket`. |
+| **Hermes Shared Secret** | Secret required for the inbound callback. Hermes must send it as `X-Hermes-Secret`. |
+| **Internal Note Poster** | Displayed poster for notes created by the callback. Default: `Hermes Agent`. |
 
-#### Authentication (Basic Auth)
+### Authentication to Hermes
 
-| Field | Description |
-|---|---|
-| **Username** | HTTP Basic Auth username. Leave blank for no authentication. |
-| **Password** | HTTP Basic Auth password. Stored encrypted by osTicket. |
-
-#### Department Filter
+Optional HTTP Basic Auth for the outbound webhook:
 
 | Field | Description |
 |---|---|
-| **Departments** | Select one or more departments. Only tickets in these departments trigger the webhook. **Leave empty to trigger for ALL departments.** |
+| **Username** | Basic Auth username. Leave empty for no Basic Auth. |
+| **Password** | Basic Auth password. Stored through osTicket plugin config. |
 
-#### Advanced Settings
+### Department Filter
 
 | Field | Description |
 |---|---|
-| **Verify SSL Certificate** | Verify the endpoint's SSL certificate. Disable for self-signed certs. Default: enabled. |
-| **Resolve Host Override (IP)** | Enter the real backend IP if the webhook domain is reverse-proxied by the same server osTicket runs on. This prevents DNS loopback issues. Enter only a bare IP address (e.g. `10.0.1.50`), not `IP:port`. Leave empty for normal DNS resolution. |
-| **Custom Header** | An optional extra HTTP header sent with every request (e.g. `X-Api-Key: abc123`). |
-| **Enable Debug Logging** | Write detailed request/response information to `webhook.log` inside the plugin directory. Useful for troubleshooting; disable in production. |
+| **Departments** | Trigger only for selected departments. Empty = all departments. |
 
-## Webhook payload
+### Advanced Settings
 
-The plugin sends a `POST` request with `Content-Type: application/json`. Example payload:
+| Field | Description |
+|---|---|
+| **Verify SSL Certificate** | Keep enabled in production. Disable only for test/self-signed endpoints. |
+| **Resolve Host Override (IP)** | cURL `CURLOPT_RESOLVE` helper for reverse-proxy / loopback DNS issues. Bare IP only. |
+| **Custom Header** | Optional extra outbound header, e.g. `X-Api-Key: xxx`. |
+| **Enable Debug Logging** | Writes `webhook.log` in the plugin directory. Disable after testing. |
+
+## Outbound payload to Hermes
+
+The plugin sends `POST` JSON with `Content-Type: application/json` when a ticket is created.
+
+Example shape:
 
 ```json
 {
   "event": "ticket.created",
+  "source": "osticket",
+  "plugin": {
+    "name": "Hermes Agent Ticket Webhook",
+    "version": "1.1.0",
+    "osticket": "1.18.x",
+    "callback": {
+      "method": "POST",
+      "url": "https://support.example.com/api/hermes/note",
+      "auth": "X-Hermes-Secret"
+    }
+  },
   "ticket": {
     "id": 1234,
     "number": "ABC-567",
-    "subject": "Cannot access VPN",
+    "subject": "Question produit",
     "status": "Open",
-    "priority": "High",
+    "priority": "Normal",
     "sla": "Default SLA",
     "source": "Web",
-    "due_date": "2026-04-15 17:00:00",
-    "created": "2026-04-10 09:30:00"
+    "due_date": null,
+    "created": "2026-05-07 17:30:00",
+    "url": "https://support.example.com/scp/tickets.php?id=1234"
   },
   "department": {
-    "id": 1,
-    "name": "IT Support"
+    "id": 2,
+    "name": "Commercial"
   },
   "requester": {
     "name": "Jane Doe",
-    "email": "jane.doe@example.com"
+    "email": "jane@example.com"
   },
-  "help_topic": "General Inquiry",
-  "assigned_to": {
-    "staff": {
-      "id": 5,
-      "name": "John Admin",
-      "email": "john.admin@example.com"
-    }
-  }
+  "message": {
+    "id": 555,
+    "title": "Question produit",
+    "body": "Bonjour, ...",
+    "created": "2026-05-07 17:30:00"
+  },
+  "help_topic": "Demande commerciale",
+  "assigned_to": null
 }
 ```
 
-The `assigned_to` field is `null` when the ticket is not yet assigned. It may contain `staff`, `team`, or both.
+The HTTP call uses short timeouts (`connect=2s`, total `3s`) so ticket creation is not blocked for long. Hermes must perform the expensive work asynchronously.
 
-## Reverse-proxy environments
+## Inbound Hermes callback
 
-If osTicket and the webhook target (e.g. an n8n or Zapier instance) are behind the **same reverse proxy**, cURL requests from PHP loop back to the local web server instead of reaching the real backend. This typically causes SSL/SNI errors like:
+Hermes can create an internal note with:
 
+```bash
+curl -X POST 'https://support.example.com/api/hermes/note' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Hermes-Secret: <shared-secret>' \
+  -d '{
+    "ticket_id": 1234,
+    "title": "Proposition Hermes Agent",
+    "note": "Réponse proposée à relire par un opérateur...",
+    "warnings": ["Vérifier la disponibilité ERP avant réponse"],
+    "metadata": {"model": "hermes", "confidence": "review_required"}
+  }'
 ```
-AH02032: Hostname webhook.example.com provided via SNI and hostname
-osticket.example.com provided via HTTP have no compatible SSL setup
-```
 
-**Two solutions:**
+Accepted body fields:
 
-1. **Direct URL** (recommended): set the Webhook URL to the backend's internal address, e.g. `http://10.0.1.50:5678/webhook/endpoint`. This bypasses the proxy entirely.
+| Field | Required | Description |
+|---|---:|---|
+| `ticket_id` | yes | osTicket internal ticket id. Alternative accepted: `ticket.id`. |
+| `title` | no | Internal note title. Defaults to `Proposition Hermes Agent`. |
+| `note` | yes | Proposal content. Alternatives accepted: `proposal` or `content`. |
+| `warnings` | no | Array rendered below the proposal. |
+| `metadata` | no | JSON object rendered in a `<pre>` block for audit/debug. |
 
-2. **Resolve Host Override**: keep the public URL but set the Resolve Host Override field to the real backend IP. cURL will connect directly to that IP while keeping the original `Host` header and SNI intact.
+Responses:
+
+| Status | Meaning |
+|---:|---|
+| `201` | Internal note created. |
+| `400` | Invalid JSON, missing ticket id, or missing note. |
+| `401` | Missing `X-Hermes-Secret`. |
+| `403` | Secret does not match any active plugin instance. |
+| `404` | Ticket not found. |
+| `500` | osTicket failed to create the note. |
+
+## Security notes
+
+- Use a long random `Hermes Shared Secret`.
+- Prefer HTTPS for both outbound and inbound flows.
+- Restrict `/api/hermes/note` at reverse proxy/firewall level to Hermes IPs if possible.
+- The plugin creates **internal notes only** and disables staff alerts for callback notes.
+- Do not put API keys in README, logs, screenshots, or commits.
 
 ## Troubleshooting
 
-1. **Enable Debug Logging** in the instance's Advanced Settings.
-2. Create a test ticket in a monitored department.
-3. Check `include/plugins/ticket-webhook/webhook.log` for detailed output.
-4. Errors are also written to osTicket's **Admin Panel > Dashboard > System Logs**.
+1. Enable **Debug Logging** in the plugin instance.
+2. Create a ticket in a monitored department.
+3. Check `include/plugins/osticket-hermes-agent-plugin/webhook.log`.
+4. Check **Admin Panel > Dashboard > System Logs** for outbound webhook failures.
+5. Test callback manually with `curl` using a non-sensitive test shared secret.
 
-**Common issues:**
+Common issues:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| No log entries at all | Plugin not active, or no enabled instances | Check plugin status and instance **Active** checkbox |
-| `Call to undefined function curl_init()` | `php-curl` not installed | `sudo apt install php8.1-curl && sudo systemctl restart php8.1-fpm` |
-| SSL handshake errors in Apache log | Webhook domain resolves to same server | Use a direct internal URL or the Resolve Host Override field |
-| `Couldn't parse CURLOPT_RESOLVE entry` | Resolve field contains port (e.g. `10.0.1.50:5678`) | Enter only the bare IP address, no port |
-| Webhook fires but returns HTTP 401 | Auth credentials wrong | Verify Basic Auth username and password |
-
-## Multi-instance example
-
-You can create multiple instances to route different departments to different endpoints:
-
-| Instance | Departments | Webhook URL |
-|---|---|---|
-| "IT Alerts" | IT Support | `https://hooks.slack.com/services/xxx` |
-| "Sales CRM" | Sales, Pre-Sales | `https://crm.example.com/api/ticket` |
-| "All to n8n" | *(empty = all)* | `http://10.0.1.50:5678/webhook/osticket` |
+| No outbound call | Plugin disabled, no active instance, department filter mismatch | Check plugin + instance status and department selection |
+| `curl_init()` missing | PHP cURL extension absent | Install `php-curl` for the PHP version used by the web server |
+| Callback returns `401` | Missing header | Send `X-Hermes-Secret` |
+| Callback returns `403` | Wrong secret or inactive instance | Verify active instance and shared secret |
+| Callback returns `404` | Hermes used ticket number instead of internal id | Use `ticket.id`, not `ticket.number` |
+| SSL/SNI errors | Reverse-proxy loopback | Use internal Hermes URL or Resolve Host Override |
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT, inherited from the upstream project.

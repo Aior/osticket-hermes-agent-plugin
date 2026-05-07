@@ -21,14 +21,18 @@ require_once INCLUDE_DIR . 'class.signal.php';
 require_once INCLUDE_DIR . 'class.plugin.php';
 require_once INCLUDE_DIR . 'class.dept.php';
 require_once INCLUDE_DIR . 'class.ticket.php';
+require_once INCLUDE_DIR . 'class.thread.php';
 
 
 class TicketWebhookPlugin extends Plugin {
 
     var $config_class = 'TicketWebhookConfig';
 
-    /** Ensures the signal handler is registered only once per request. */
+    /** Ensures the ticket signal handler is registered only once per request. */
     private static $signalConnected = false;
+
+    /** Ensures the Hermes callback API route is registered only once per request. */
+    private static $apiConnected = false;
 
     /**
      * Called once per enabled instance during osTicket bootstrap.
@@ -39,6 +43,12 @@ class TicketWebhookPlugin extends Plugin {
             Signal::connect('ticket.created',
                 array($this, 'onTicketCreated'));
             self::$signalConnected = true;
+        }
+
+        if (!self::$apiConnected) {
+            Signal::connect('api',
+                array($this, 'registerHermesApiRoutes'));
+            self::$apiConnected = true;
         }
     }
 
@@ -106,8 +116,29 @@ class TicketWebhookPlugin extends Plugin {
         $sla      = $ticket->getSLA();
         $topic    = $ticket->getHelpTopic();
 
+        global $ost;
+
+        $callbackUrl = null;
+        $staffUrl = null;
+        if ($ost && $ost->getConfig()) {
+            $baseUrl = rtrim($ost->getConfig()->getBaseUrl(), '/');
+            $callbackUrl = $baseUrl . '/api/hermes/note';
+            $staffUrl = $baseUrl . '/scp/tickets.php?id=' . $ticket->getId();
+        }
+
         return array(
             'event'       => 'ticket.created',
+            'source'      => 'osticket',
+            'plugin'      => array(
+                'name'       => 'Hermes Agent Ticket Webhook',
+                'version'    => '1.1.0',
+                'osticket'   => '1.18.x',
+                'callback'   => array(
+                    'method' => 'POST',
+                    'url'    => $callbackUrl,
+                    'auth'   => 'X-Hermes-Secret',
+                ),
+            ),
             'ticket'      => array(
                 'id'       => $ticket->getId(),
                 'number'   => $ticket->getNumber(),
@@ -120,6 +151,7 @@ class TicketWebhookPlugin extends Plugin {
                 'source'   => $ticket->getSource(),
                 'due_date' => $ticket->getEstDueDate(),
                 'created'  => $ticket->getCreateDate(),
+                'url'      => $staffUrl,
             ),
             'department'  => array(
                 'id'   => $dept ? $dept->getId()   : null,
@@ -133,10 +165,27 @@ class TicketWebhookPlugin extends Plugin {
                     ? $owner->getEmail()
                     : $ticket->getEmail(),
             ),
+            'message'     => $this->getLastMessageInfo($ticket),
             'help_topic'  => is_object($topic)
                 ? self::safeGetProperty($topic, 'getName')
                 : self::safeString($topic),
             'assigned_to' => $this->getAssigneeInfo($ticket),
+        );
+    }
+
+    private function getLastMessageInfo($ticket) {
+        if (!method_exists($ticket, 'getLastMessage'))
+            return null;
+
+        $message = $ticket->getLastMessage();
+        if (!$message || !is_object($message))
+            return null;
+
+        return array(
+            'id'      => method_exists($message, 'getId') ? $message->getId() : null,
+            'title'   => method_exists($message, 'getTitle') ? self::safeString($message->getTitle()) : null,
+            'body'    => method_exists($message, 'getBody') ? self::safeString($message->getBody()) : null,
+            'created' => method_exists($message, 'getCreateDate') ? $message->getCreateDate() : null,
         );
     }
 
@@ -186,8 +235,8 @@ class TicketWebhookPlugin extends Plugin {
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 5);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 3);
 
         // --- Basic Auth ---
         $username = trim($config->get('auth-username') ?: '');
@@ -269,6 +318,133 @@ class TicketWebhookPlugin extends Plugin {
     }
 
     // ------------------------------------------------------------------
+    //  Hermes callback API: POST /api/hermes/note
+    // ------------------------------------------------------------------
+
+    function registerHermesApiRoutes($dispatcher) {
+        $dispatcher->append(
+            url_post('^/hermes/note$', array($this, 'postHermesNote'))
+        );
+    }
+
+    function postHermesNote() {
+        $this->sendJsonHeaders();
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST')
+            return $this->jsonResponse(405, array('ok' => false, 'error' => 'method_not_allowed'));
+
+        $secret = $this->getRequestSecret();
+        if (!$secret)
+            return $this->jsonResponse(401, array('ok' => false, 'error' => 'missing_secret'));
+
+        $config = $this->findConfigByHermesSecret($secret);
+        if (!$config)
+            return $this->jsonResponse(403, array('ok' => false, 'error' => 'invalid_secret'));
+
+        $raw = file_get_contents('php://input');
+        $data = json_decode($raw, true);
+        if (!is_array($data))
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'invalid_json'));
+
+        $ticketId = isset($data['ticket_id']) ? (int) $data['ticket_id'] : 0;
+        if (!$ticketId && isset($data['ticket']['id']))
+            $ticketId = (int) $data['ticket']['id'];
+
+        if (!$ticketId)
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_ticket_id'));
+
+        $ticket = Ticket::lookup($ticketId);
+        if (!$ticket)
+            return $this->jsonResponse(404, array('ok' => false, 'error' => 'ticket_not_found'));
+
+        $title = trim($data['title'] ?? 'Proposition Hermes Agent');
+        $note = trim($data['note'] ?? $data['proposal'] ?? $data['content'] ?? '');
+        if (!$note)
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_note'));
+
+        $poster = trim($config->get('note-poster') ?: 'Hermes Agent');
+        $errors = array();
+        $entry = $ticket->postNote(array(
+            'title' => $title,
+            'note' => new HtmlThreadEntryBody($this->formatHermesNote($note, $data)),
+            'activity' => 'Hermes Agent proposal added',
+        ), $errors, $poster, false);
+
+        if (!$entry) {
+            self::log('FAILED adding Hermes note on ticket #' . $ticketId . ': ' . json_encode($errors));
+            return $this->jsonResponse(500, array('ok' => false, 'error' => 'note_failed', 'details' => $errors));
+        }
+
+        return $this->jsonResponse(201, array(
+            'ok' => true,
+            'ticket_id' => $ticketId,
+            'note_id' => method_exists($entry, 'getId') ? $entry->getId() : null,
+        ));
+    }
+
+    private function getRequestSecret() {
+        $headers = function_exists('getallheaders') ? getallheaders() : array();
+        foreach ($headers as $name => $value) {
+            if (strcasecmp($name, 'X-Hermes-Secret') === 0)
+                return trim($value);
+        }
+
+        if (isset($_SERVER['HTTP_X_HERMES_SECRET']))
+            return trim($_SERVER['HTTP_X_HERMES_SECRET']);
+
+        if (isset($_GET['secret']))
+            return trim($_GET['secret']);
+
+        return '';
+    }
+
+    private function findConfigByHermesSecret($secret) {
+        foreach ($this->getActiveInstances() as $instance) {
+            $config = $instance->getConfig();
+            if (!$config)
+                continue;
+
+            $configured = trim($config->get('hermes-secret') ?: '');
+            if ($configured && function_exists('hash_equals') && hash_equals($configured, $secret))
+                return $config;
+            if ($configured && !function_exists('hash_equals') && $configured === $secret)
+                return $config;
+        }
+        return null;
+    }
+
+    private function formatHermesNote($note, array $data) {
+        $html = '<div class="hermes-agent-note">';
+        $html .= '<p><strong>Proposition générée par Hermes Agent.</strong></p>';
+        $html .= '<div>' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
+
+        if (!empty($data['warnings']) && is_array($data['warnings'])) {
+            $html .= '<hr><p><strong>Alertes / garde-fous</strong></p><ul>';
+            foreach ($data['warnings'] as $warning)
+                $html .= '<li>' . htmlspecialchars(self::safeString($warning), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</li>';
+            $html .= '</ul>';
+        }
+
+        if (!empty($data['metadata']) && is_array($data['metadata'])) {
+            $html .= '<hr><pre>' . htmlspecialchars(json_encode($data['metadata'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
+        }
+
+        $html .= '</div>';
+        return $html;
+    }
+
+    private function sendJsonHeaders() {
+        if (!headers_sent())
+            header('Content-Type: application/json; charset=utf-8');
+    }
+
+    private function jsonResponse($status, array $payload) {
+        if (!headers_sent())
+            http_response_code($status);
+        return json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+
+    // ------------------------------------------------------------------
     //  Helpers
     // ------------------------------------------------------------------
 
@@ -323,16 +499,29 @@ class TicketWebhookConfig extends PluginConfig {
                 ),
             )),
             'webhook-url' => new TextboxField(array(
-                'label'    => 'Webhook URL',
-                'hint'     => 'Full URL that will receive the POST request (e.g. https://example.com/api/webhook).',
+                'label'    => 'Hermes Webhook URL',
+                'hint'     => 'Full Hermes/n8n/Hermes Gateway URL that receives ticket.created events (e.g. https://hermes.example.com/webhook/osticket).',
                 'required' => true,
                 'configuration' => array('size' => 80, 'length' => 512),
+            )),
+            'hermes-secret' => new PasswordField(array(
+                'label'    => 'Hermes Shared Secret',
+                'hint'     => 'Shared secret expected from Hermes on callback POST /api/hermes/note. Hermes must send it as X-Hermes-Secret.',
+                'required' => true,
+                'widget'   => 'PasswordWidget',
+                'configuration' => array('size' => 64, 'length' => 256),
+            )),
+            'note-poster' => new TextboxField(array(
+                'label' => 'Internal Note Poster',
+                'hint'  => 'Poster displayed on internal notes created by the Hermes callback endpoint.',
+                'default' => 'Hermes Agent',
+                'configuration' => array('size' => 40, 'length' => 80),
             )),
 
             // --- Auth ---
             'auth-section' => new SectionBreakField(array(
-                'label' => 'Authentication (Basic Auth)',
-                'hint'  => 'Optional HTTP Basic Authentication credentials. Leave blank to send unauthenticated requests.',
+                'label' => 'Authentication to Hermes (Basic Auth)',
+                'hint'  => 'Optional HTTP Basic Authentication credentials for the outbound Hermes webhook. Leave blank to send unauthenticated requests.',
             )),
             'auth-username' => new TextboxField(array(
                 'label' => 'Username',
@@ -393,8 +582,8 @@ class TicketWebhookConfig extends PluginConfig {
 
     function getFormOptions() {
         return array(
-            'title'  => 'Ticket Webhook Configuration',
-            'notice' => 'Configure the webhook endpoint, authentication, and department filters for this instance.',
+            'title'  => 'Hermes Agent Ticket Webhook Configuration',
+            'notice' => 'Configure outbound ticket.created events to Hermes and the secured callback used by Hermes to create internal notes.',
         );
     }
 
@@ -407,7 +596,12 @@ class TicketWebhookConfig extends PluginConfig {
         }
 
         if ($url && stripos($url, 'http') !== 0) {
-            $errors['err'] = 'The Webhook URL must start with http:// or https://.';
+            $errors['err'] = 'The Hermes Webhook URL must start with http:// or https://.';
+            return false;
+        }
+
+        if (empty($config['hermes-secret'])) {
+            $errors['err'] = 'The Hermes Shared Secret is required for secure note callbacks.';
             return false;
         }
 
