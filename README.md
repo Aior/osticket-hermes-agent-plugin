@@ -7,7 +7,7 @@ The plugin keeps the useful base behaviour from osT-TTW — outbound JSON webhoo
 1. osTicket creates a ticket.
 2. The plugin sends a short-timeout JSON webhook to Hermes Agent.
 3. Hermes analyses the ticket asynchronously.
-4. Hermes calls back osTicket on `POST /api/hermes/note`.
+4. Hermes calls back osTicket on `POST /api/http.php/hermes/note`.
 5. The plugin adds Hermes' proposal as an **internal note only**.
 
 It never sends an automatic reply to the customer.
@@ -95,7 +95,7 @@ Example shape:
     "osticket": "1.18.x",
     "callback": {
       "method": "POST",
-      "url": "https://support.example.com/api/hermes/note",
+      "url": "https://support.example.com/api/http.php/hermes/note",
       "auth": "X-Hermes-Secret"
     }
   },
@@ -137,7 +137,7 @@ The HTTP call uses short timeouts (`connect=2s`, total `3s`) so ticket creation 
 Hermes can create an internal note with:
 
 ```bash
-curl -X POST 'https://support.example.com/api/hermes/note' \
+curl -X POST 'https://support.example.com/api/http.php/hermes/note' \
   -H 'Content-Type: application/json' \
   -H 'X-Hermes-Secret: <shared-secret>' \
   -d '{
@@ -174,7 +174,7 @@ Responses:
 
 - Use a long random `Hermes Shared Secret`.
 - Prefer HTTPS for both outbound and inbound flows.
-- Restrict `/api/hermes/note` at reverse proxy/firewall level to Hermes IPs if possible.
+- Restrict `/api/http.php/hermes/note` at reverse proxy/firewall level to Hermes IPs if possible.
 - The plugin creates **internal notes only** and disables staff alerts for callback notes.
 - Do not put API keys in README, logs, screenshots, or commits.
 
@@ -194,6 +194,7 @@ Common issues:
 | `curl_init()` missing | PHP cURL extension absent | Install `php-curl` for the PHP version used by the web server |
 | Callback returns `401` | Missing header | Send `X-Hermes-Secret` |
 | Callback returns `403` | Wrong secret or inactive instance | Verify active instance and shared secret |
+| Callback returns Apache `404` on `/api/hermes/note` | Pretty API rewrites are not enabled or osTicket is installed in a subdirectory | Use the explicit front-controller URL `/api/http.php/hermes/note` |
 | Callback returns `404` | Hermes used ticket number instead of internal id | Use `ticket.id`, not `ticket.number` |
 | SSL/SNI errors | Reverse-proxy loopback | Use internal Hermes URL or Resolve Host Override |
 
