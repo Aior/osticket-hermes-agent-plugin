@@ -3,7 +3,8 @@
  * osTicket Ticket Webhook Plugin
  *
  * Fires an HTTP POST request with JSON ticket details whenever a new
- * ticket is created in one of the configured departments.
+ * ticket is created in one of the configured departments, and optionally
+ * whenever the requester adds a follow-up message to an existing ticket.
  *
  * Features:
  *  - Multi-instance: route different departments to different endpoints
@@ -34,6 +35,9 @@ class TicketWebhookPlugin extends Plugin {
     /** Ensures the Hermes callback API route is registered only once per request. */
     private static $apiConnected = false;
 
+    /** Ensures the thread-entry signal handler is registered only once per request. */
+    private static $threadEntrySignalConnected = false;
+
     /**
      * Called once per enabled instance during osTicket bootstrap.
      * Registers the ticket.created signal handler.
@@ -50,6 +54,12 @@ class TicketWebhookPlugin extends Plugin {
                 array($this, 'registerHermesApiRoutes'));
             self::$apiConnected = true;
         }
+
+        if (!self::$threadEntrySignalConnected) {
+            Signal::connect('threadentry.created',
+                array($this, 'onThreadEntryCreated'));
+            self::$threadEntrySignalConnected = true;
+        }
     }
 
     /**
@@ -59,10 +69,47 @@ class TicketWebhookPlugin extends Plugin {
     function onTicketCreated($ticket) {
         foreach ($this->getActiveInstances() as $instance) {
             try {
-                $this->processInstance($instance, $ticket);
+                $this->processInstance($instance, $ticket, 'ticket.created');
             } catch (\Throwable $e) {
                 self::log(
                     sprintf('Exception in instance %d: %s', $instance->getId(), $e->getMessage())
+                );
+            }
+        }
+    }
+
+    /**
+     * Signal handler: fires for every new thread entry. We only forward
+     * requester/collaborator follow-up messages on existing ticket threads.
+     *
+     * This intentionally ignores:
+     *  - internal notes (including Hermes callback notes),
+     *  - staff responses,
+     *  - system entries,
+     *  - likely original ticket messages without a parent entry.
+     */
+    function onThreadEntryCreated($entry) {
+        if (!$this->isClientFollowupEntry($entry))
+            return;
+
+        $thread = $entry->getThread();
+        if (!$thread || $thread->getObjectType() != ObjectModel::OBJECT_TYPE_TICKET)
+            return;
+
+        $ticket = $thread->getObject();
+        if (!$ticket || !($ticket instanceof Ticket))
+            return;
+
+        foreach ($this->getActiveInstances() as $instance) {
+            try {
+                $config = $instance->getConfig();
+                if (!$config || !$this->configBool($config, 'webhook-client-replies-enabled', true))
+                    continue;
+
+                $this->processInstance($instance, $ticket, 'ticket.client_reply', $entry);
+            } catch (\Throwable $e) {
+                self::log(
+                    sprintf('Exception in thread-entry instance %d: %s', $instance->getId(), $e->getMessage())
                 );
             }
         }
@@ -72,7 +119,7 @@ class TicketWebhookPlugin extends Plugin {
     //  Instance processing
     // ------------------------------------------------------------------
 
-    private function processInstance(PluginInstance $instance, $ticket) {
+    private function processInstance(PluginInstance $instance, $ticket, $event='ticket.created', $entry=null) {
         $config = $instance->getConfig();
         if (!$config)
             return;
@@ -96,7 +143,7 @@ class TicketWebhookPlugin extends Plugin {
         }
 
         // --- Build & send ---
-        $payload = $this->buildPayload($ticket);
+        $payload = $this->buildPayload($ticket, $event, $entry);
         $this->sendWebhook($url, $payload, $config);
     }
 
@@ -104,7 +151,7 @@ class TicketWebhookPlugin extends Plugin {
     //  Payload
     // ------------------------------------------------------------------
 
-    private function buildPayload($ticket) {
+    private function buildPayload($ticket, $event='ticket.created', $entry=null) {
         $owner = $ticket->getOwner();
         $dept  = $ticket->getDept();
 
@@ -132,11 +179,12 @@ class TicketWebhookPlugin extends Plugin {
         }
 
         return array(
-            'event'       => 'ticket.created',
+            'event'       => $event,
+            'event_type'  => $event,
             'source'      => 'osticket',
             'plugin'      => array(
                 'name'       => 'Hermes Agent Ticket Webhook',
-                'version'    => '1.1.0',
+                'version'    => '1.2.0',
                 'osticket'   => '1.18.x',
                 'callback'   => array(
                     'method' => 'POST',
@@ -170,12 +218,42 @@ class TicketWebhookPlugin extends Plugin {
                     ? $owner->getEmail()
                     : $ticket->getEmail(),
             ),
-            'message'     => $this->getLastMessageInfo($ticket),
+            'message'     => $entry
+                ? $this->getThreadEntryInfo($entry)
+                : $this->getLastMessageInfo($ticket),
+            'thread'      => $this->getThreadHistory($ticket, 12),
             'help_topic'  => is_object($topic)
                 ? self::safeGetProperty($topic, 'getName')
                 : self::safeString($topic),
             'assigned_to' => $this->getAssigneeInfo($ticket),
         );
+    }
+
+    private function isClientFollowupEntry($entry) {
+        if (!$entry || !is_object($entry) || !method_exists($entry, 'getType'))
+            return false;
+
+        // Customer/requester messages are type M. Staff responses are R and
+        // internal notes are N, so this prevents Hermes-note callback loops.
+        if ($entry->getType() !== MessageThreadEntry::ENTRY_TYPE)
+            return false;
+
+        if (!method_exists($entry, 'getUserId') || !$entry->getUserId())
+            return false;
+
+        if (method_exists($entry, 'getStaffId') && $entry->getStaffId())
+            return false;
+
+        if (method_exists($entry, 'isBounceOrAutoReply') && $entry->isBounceOrAutoReply())
+            return false;
+
+        // The first message created with the ticket generally has no parent.
+        // It is already covered by the ticket.created webhook. Follow-up client
+        // replies are expected to reference a previous entry.
+        if (method_exists($entry, 'getPid') && !$entry->getPid())
+            return false;
+
+        return true;
     }
 
     private function getLastMessageInfo($ticket) {
@@ -192,6 +270,58 @@ class TicketWebhookPlugin extends Plugin {
             'body'    => method_exists($message, 'getBody') ? self::safeString($message->getBody()) : null,
             'created' => method_exists($message, 'getCreateDate') ? $message->getCreateDate() : null,
         );
+    }
+
+    private function getThreadEntryInfo($entry) {
+        if (!$entry || !is_object($entry))
+            return null;
+
+        $user = method_exists($entry, 'getUser') ? $entry->getUser() : null;
+        $staff = method_exists($entry, 'getStaff') ? $entry->getStaff() : null;
+
+        return array(
+            'id'        => method_exists($entry, 'getId') ? $entry->getId() : null,
+            'parent_id' => method_exists($entry, 'getPid') ? $entry->getPid() : null,
+            'type'      => method_exists($entry, 'getType') ? $entry->getType() : null,
+            'type_name' => method_exists($entry, 'getTypeName') ? $entry->getTypeName() : null,
+            'title'     => method_exists($entry, 'getTitle') ? self::safeString($entry->getTitle()) : null,
+            'body'      => method_exists($entry, 'getBody') ? self::safeString($entry->getBody()) : null,
+            'poster'    => method_exists($entry, 'getPoster') ? self::safeString($entry->getPoster()) : null,
+            'source'    => method_exists($entry, 'getSource') ? self::safeString($entry->getSource()) : null,
+            'created'   => method_exists($entry, 'getCreateDate') ? $entry->getCreateDate() : (isset($entry->created) ? $entry->created : null),
+            'author'    => array(
+                'kind'  => $user ? 'user' : ($staff ? 'staff' : 'system'),
+                'id'    => $user && method_exists($user, 'getId') ? $user->getId() : ($staff && method_exists($staff, 'getId') ? $staff->getId() : null),
+                'name'  => $user && method_exists($user, 'getName') ? self::safeString($user->getName()) : ($staff && method_exists($staff, 'getName') ? self::safeString($staff->getName()) : null),
+                'email' => $user && method_exists($user, 'getEmail') ? $user->getEmail() : ($staff && method_exists($staff, 'getEmail') ? $staff->getEmail() : null),
+            ),
+        );
+    }
+
+    private function getThreadHistory($ticket, $limit=12) {
+        if (!$ticket || !method_exists($ticket, 'getThread') || !($thread = $ticket->getThread()))
+            return null;
+
+        $history = array();
+        $entries = clone $thread->getEntries();
+        $entries->filter(array(
+            'type__in' => array(
+                MessageThreadEntry::ENTRY_TYPE,
+                ResponseThreadEntry::ENTRY_TYPE,
+                NoteThreadEntry::ENTRY_TYPE,
+            ),
+        ));
+        $entries->order_by('-id');
+        if (method_exists($entries, 'limit'))
+            $entries->limit($limit);
+
+        foreach ($entries as $entry) {
+            $history[] = $this->getThreadEntryInfo($entry);
+            if (count($history) >= $limit)
+                break;
+        }
+
+        return array_reverse($history);
     }
 
     private function getAssigneeInfo($ticket) {
@@ -474,6 +604,13 @@ class TicketWebhookPlugin extends Plugin {
         return (string) $val;
     }
 
+    private function configBool(PluginConfig $config, $key, $default=false) {
+        $value = $config->get($key);
+        if ($value === null || $value === '')
+            return (bool) $default;
+        return (bool) $value;
+    }
+
     /** Append to the plugin log file (only when debug is likely on). */
     private static function log($message) {
         $logFile = dirname(__DIR__) . '/webhook.log';
@@ -503,9 +640,16 @@ class TicketWebhookConfig extends PluginConfig {
                     'desc' => 'Activate this webhook instance',
                 ),
             )),
+            'webhook-client-replies-enabled' => new BooleanField(array(
+                'label'   => 'Send Client Replies',
+                'default' => true,
+                'configuration' => array(
+                    'desc' => 'Also notify Hermes when a requester/collaborator replies to an existing ticket. Staff responses and internal notes are ignored.',
+                ),
+            )),
             'webhook-url' => new TextboxField(array(
                 'label'    => 'Hermes Webhook URL',
-                'hint'     => 'Full Hermes/n8n/Hermes Gateway URL that receives ticket.created events (e.g. https://hermes.example.com/webhook/osticket).',
+                'hint'     => 'Full Hermes Gateway URL that receives ticket.created and ticket.client_reply events (e.g. http://hermes.example.com:8644/webhooks/osticket-hermes).',
                 'required' => true,
                 'configuration' => array('size' => 80, 'length' => 512),
             )),
@@ -572,7 +716,7 @@ class TicketWebhookConfig extends PluginConfig {
             )),
             'webhook-custom-header' => new TextboxField(array(
                 'label' => 'Custom Header',
-                'hint'  => 'Optional additional HTTP header (e.g. X-Api-Key: abc123).',
+                'hint'  => 'Optional additional HTTP header (e.g. X-Example-Header: value).',
                 'configuration' => array('size' => 80, 'length' => 256),
             )),
             'debug-log' => new BooleanField(array(
@@ -588,7 +732,7 @@ class TicketWebhookConfig extends PluginConfig {
     function getFormOptions() {
         return array(
             'title'  => 'Hermes Agent Ticket Webhook Configuration',
-            'notice' => 'Configure outbound ticket.created events to Hermes and the secured callback used by Hermes to create internal notes.',
+            'notice' => 'Configure outbound ticket.created/client-reply events to Hermes and the secured callback used by Hermes to create internal notes.',
         );
     }
 

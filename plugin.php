@@ -10,10 +10,10 @@
  */
 return array(
     'id'          => 'pearl:hermes-agent-webhook',
-    'version'     => '1.1.0',
+    'version'     => '1.2.0',
     'name'        => 'Hermes Agent Ticket Webhook',
     'author'      => 'Pearl Diffusion / osTicket Community',
-    'description' => 'Sends asynchronous ticket creation webhooks to Hermes Agent and exposes a secured callback endpoint to add Hermes proposals as internal notes. Supports osTicket 1.18.x, department filtering, Basic Auth, shared-secret callbacks, multi-instance configuration, and reverse-proxy environments.',
+    'description' => 'Sends asynchronous ticket creation and client-reply webhooks to Hermes Agent and exposes a secured callback endpoint to add Hermes proposals as internal notes. Supports osTicket 1.18.x, department filtering, Basic Auth, shared-secret callbacks, multi-instance configuration, and reverse-proxy environments.',
     'url'         => 'https://github.com/Aior/osticket-hermes-agent-plugin',
     'ost_version' => '1.18',
     'plugin'      => 'include/class.ticket-webhook.php:TicketWebhookPlugin',

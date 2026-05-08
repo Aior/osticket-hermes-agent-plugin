@@ -2,9 +2,9 @@
 
 Fork of [`sitkowsp/osT-TTW`](https://github.com/sitkowsp/osT-TTW), adapted for the Pearl/MacWay Hermes Agent workflow on **osTicket 1.18.x**.
 
-The plugin keeps the useful base behaviour from osT-TTW — outbound JSON webhook on `ticket.created`, department filtering, Basic Auth, custom headers, reverse-proxy DNS override — and adds the Hermes-specific loop:
+The plugin keeps the useful base behaviour from osT-TTW — outbound JSON webhook on `ticket.created`, department filtering, Basic Auth, custom headers, reverse-proxy DNS override — and adds the Hermes-specific loop plus optional `ticket.client_reply` follow-up events:
 
-1. osTicket creates a ticket.
+1. osTicket creates a ticket, or a requester/collaborator adds a follow-up message.
 2. The plugin sends a short-timeout JSON webhook to Hermes Agent.
 3. Hermes analyses the ticket asynchronously.
 4. Hermes calls back osTicket on `POST /api/http.php/hermes/note`.
@@ -51,7 +51,8 @@ Then in osTicket:
 | Field | Description |
 |---|---|
 | **Enable Webhook** | Master on/off toggle for this instance. |
-| **Hermes Webhook URL** | Endpoint that receives outbound `ticket.created` events. Example: `https://hermes.example.com/webhook/osticket`. |
+| **Send Client Replies** | Also send `ticket.client_reply` when a requester/collaborator replies to an existing ticket. Staff responses and internal notes are ignored. |
+| **Hermes Webhook URL** | Endpoint that receives outbound `ticket.created` and `ticket.client_reply` events. For Hermes Gateway use `http://<hermes-host>:8644/webhooks/osticket-hermes` (plural `/webhooks/`). |
 | **Hermes Shared Secret** | Secret required for the inbound callback. Hermes must send it as `X-Hermes-Secret`. |
 | **Internal Note Poster** | Displayed poster for notes created by the callback. Default: `Hermes Agent`. |
 
@@ -76,22 +77,23 @@ Optional HTTP Basic Auth for the outbound webhook:
 |---|---|
 | **Verify SSL Certificate** | Keep enabled in production. Disable only for test/self-signed endpoints. |
 | **Resolve Host Override (IP)** | cURL `CURLOPT_RESOLVE` helper for reverse-proxy / loopback DNS issues. Bare IP only. |
-| **Custom Header** | Optional extra outbound header, e.g. `X-Api-Key: xxx`. |
+| **Custom Header** | Optional extra outbound header, e.g. `X-Example-Header: value`. |
 | **Enable Debug Logging** | Writes `webhook.log` in the plugin directory. Disable after testing. |
 
 ## Outbound payload to Hermes
 
-The plugin sends `POST` JSON with `Content-Type: application/json` when a ticket is created.
+The plugin sends `POST` JSON with `Content-Type: application/json` when a ticket is created, and optionally when the requester/collaborator adds a follow-up message to an existing ticket.
 
 Example shape:
 
 ```json
 {
   "event": "ticket.created",
+  "event_type": "ticket.created",
   "source": "osticket",
   "plugin": {
     "name": "Hermes Agent Ticket Webhook",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "osticket": "1.18.x",
     "callback": {
       "method": "POST",
@@ -121,16 +123,22 @@ Example shape:
   },
   "message": {
     "id": 555,
+    "parent_id": null,
     "title": "Question produit",
     "body": "Bonjour, ...",
     "created": "2026-05-07 17:30:00"
   },
+  "thread": [
+    {"id": 555, "type": "M", "body": "Bonjour, ..."}
+  ],
   "help_topic": "Demande commerciale",
   "assigned_to": null
 }
 ```
 
-The HTTP call uses short timeouts (`connect=2s`, total `3s`) so ticket creation is not blocked for long. Hermes must perform the expensive work asynchronously.
+For follow-up messages, `event`/`event_type` is `ticket.client_reply`; `message` contains the new requester/collaborator thread entry and `thread` contains the latest entries for context. Internal notes (`N`) and staff responses (`R`) do not trigger outbound calls, preventing Hermes callback loops.
+
+The HTTP call uses short timeouts (`connect=2s`, total `3s`) so ticket creation/reply posting is not blocked for long. Hermes must perform the expensive work asynchronously.
 
 ## Inbound Hermes callback
 
@@ -181,7 +189,7 @@ Responses:
 ## Troubleshooting
 
 1. Enable **Debug Logging** in the plugin instance.
-2. Create a ticket in a monitored department.
+2. Create a ticket in a monitored department, then add a requester follow-up if testing client-reply triggers.
 3. Check `include/plugins/osticket-hermes-agent-plugin/webhook.log`.
 4. Check **Admin Panel > Dashboard > System Logs** for outbound webhook failures.
 5. Test callback manually with `curl` using a non-sensitive test shared secret.
