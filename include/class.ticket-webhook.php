@@ -585,10 +585,6 @@ class TicketWebhookPlugin extends Plugin {
      * custom classes and <script>/<button> tags from note content.
      */
     private static function injectCopyButtonScript() {
-        // Only inject on SCP pages (staff panel)
-        if (!defined('SCP') || !SCP)
-            return;
-
         global $ost;
         if (!$ost || !method_exists($ost, 'addExtraHeader'))
             return;
