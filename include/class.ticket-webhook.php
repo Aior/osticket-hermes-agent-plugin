@@ -492,7 +492,7 @@ class TicketWebhookPlugin extends Plugin {
         if (!$ticket)
             return $this->jsonResponse(404, array('ok' => false, 'error' => 'ticket_not_found'));
 
-        $title = trim($data['title'] ?? 'Proposition Hermes Agent');
+        $title = trim($data['title'] ?? 'Proposition SAV');
         $note = trim($data['note'] ?? $data['proposal'] ?? $data['content'] ?? '');
         if (!$note)
             return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_note'));
@@ -502,7 +502,7 @@ class TicketWebhookPlugin extends Plugin {
         $entry = $ticket->postNote(array(
             'title' => $title,
             'note' => new HtmlThreadEntryBody($this->formatHermesNote($note, $data)),
-            'activity' => 'Hermes Agent proposal added',
+            'activity' => 'SAV proposal added',
         ), $errors, $poster, false);
 
         if (!$entry) {
@@ -550,7 +550,6 @@ class TicketWebhookPlugin extends Plugin {
 
     private function formatHermesNote($note, array $data) {
         $html = '<div class="hermes-agent-note">';
-        $html .= '<p><strong>Proposition générée par Hermes Agent.</strong></p>';
         $html .= '<div>' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
 
         if (!empty($data['warnings']) && is_array($data['warnings'])) {
