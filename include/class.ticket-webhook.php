@@ -60,6 +60,10 @@ class TicketWebhookPlugin extends Plugin {
                 array($this, 'onThreadEntryCreated'));
             self::$threadEntrySignalConnected = true;
         }
+
+        // Inject the copy-button script into SCP pages (staff panel).
+        // Uses global $ost->addExtraHeader() which renders in <head>.
+        self::injectCopyButtonScript();
     }
 
     /**
@@ -550,7 +554,6 @@ class TicketWebhookPlugin extends Plugin {
 
     private function formatHermesNote($note, array $data) {
         $html = '<div class="hermes-agent-note">';
-        $html .= '<button type="button" class="hermes-copy-btn" title="Copier la proposition">📋 Copier</button>';
         $html .= '<div class="hermes-note-body">' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
 
         if (!empty($data['warnings']) && is_array($data['warnings'])) {
@@ -566,58 +569,119 @@ class TicketWebhookPlugin extends Plugin {
 
         $html .= '</div>';
 
-        // Inline CSS + JS for the copy button (scoped to .hermes-agent-note).
-        // Injects only once per page via a flag on the first note rendered.
-        $html .= <<<HTML
+        return $html;
+    }
+
+    /**
+     * Inject JS + CSS into the SCP staff header to add a copy button
+     * on Hermes internal notes. The script detects .hermes-agent-note
+     * elements inside .thread-entry and appends a 📋 button into the
+     * .header div of the parent thread-entry.
+     */
+    private static function injectCopyButtonScript() {
+        // Only inject on SCP pages (staff panel)
+        if (!defined('SCP') || !SCP)
+            return;
+
+        global $ost;
+        if (!$ost || !method_exists($ost, 'addExtraHeader'))
+            return;
+
+        static $injected = false;
+        if ($injected)
+            return;
+        $injected = true;
+
+        $script = <<<'SCRIPT'
 <style>
-.hermes-agent-note { position: relative; padding: 10px 12px; }
 .hermes-copy-btn {
-    position: absolute; top: 6px; right: 8px;
-    background: #f0f4f8; border: 1px solid #c0c8d0; border-radius: 4px;
-    padding: 3px 10px; cursor: pointer; font-size: 13px; z-index: 1;
-    opacity: 0.7; transition: opacity .2s, background .2s;
+    border: 1px solid #b0bec5; border-radius: 3px; padding: 2px 8px;
+    background: #eceff1; color: #37474f; cursor: pointer; font-size: 12px;
+    margin-left: 6px; vertical-align: middle; transition: background .2s, border-color .2s;
 }
-.hermes-copy-btn:hover { opacity: 1; background: #e2e8f0; }
-.hermes-copy-btn.copied { background: #d4edda; border-color: #28a745; opacity: 1; }
-.hermes-note-body { margin-top: 4px; }
+.hermes-copy-btn:hover { background: #cfd8dc; border-color: #78909c; }
+.hermes-copy-btn.copied { background: #c8e6c9; border-color: #4caf50; color: #2e7d32; }
 </style>
 <script>
 (function(){
-    var styleInjected = false;
-    function injectGlobal(){ if(styleInjected) return; styleInjected = true; }
+    function addCopyButtons(){
+        document.querySelectorAll('.hermes-agent-note').forEach(function(note){
+            // Avoid duplicate buttons
+            if(note.dataset.copyBtn === '1') return;
+            note.dataset.copyBtn = '1';
 
-    document.addEventListener('click', function(e){
-        var btn = e.target.closest('.hermes-copy-btn');
-        if(!btn) return;
-        var note = btn.closest('.hermes-agent-note');
-        if(!note) return;
-        var body = note.querySelector('.hermes-note-body');
-        if(!body) return;
-        // Extract plain text from the note body (strip HTML)
-        var text = body.innerText || body.textContent || '';
-        text = text.trim();
-        if(navigator.clipboard && navigator.clipboard.writeText){
-            navigator.clipboard.writeText(text).then(function(){
-                btn.textContent = '✅ Copié';
-                btn.classList.add('copied');
-                setTimeout(function(){ btn.textContent = '📋 Copier'; btn.classList.remove('copied'); }, 2000);
+            var entry = note.closest('.thread-entry');
+            if(!entry) return;
+
+            var header = entry.querySelector(':scope > .header');
+            if(!header) return;
+
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'hermes-copy-btn';
+            btn.title = 'Copier la proposition dans le presse-papiers';
+            btn.textContent = '\u{1F4CB} Copier';
+
+            btn.addEventListener('click', function(e){
+                e.preventDefault();
+                e.stopPropagation();
+                var body = note.querySelector('.hermes-note-body');
+                if(!body) return;
+                var text = (body.innerText || body.textContent || '').trim();
+                if(navigator.clipboard && navigator.clipboard.writeText){
+                    navigator.clipboard.writeText(text).then(function(){
+                        btn.textContent = '\u2705 Copi\u00e9';
+                        btn.classList.add('copied');
+                        setTimeout(function(){ btn.textContent = '\u{1F4CB} Copier'; btn.classList.remove('copied'); }, 2000);
+                    });
+                } else {
+                    var ta = document.createElement('textarea');
+                    ta.value = text; ta.style.position='fixed'; ta.style.left='-9999px';
+                    document.body.appendChild(ta); ta.select();
+                    try {
+                        document.execCommand('copy');
+                        btn.textContent = '\u2705 Copi\u00e9'; btn.classList.add('copied');
+                        setTimeout(function(){ btn.textContent = '\u{1F4CB} Copier'; btn.classList.remove('copied'); }, 2000);
+                    } catch(err){}
+                    document.body.removeChild(ta);
+                }
             });
-        } else {
-            // Fallback for older browsers / non-HTTPS
-            var ta = document.createElement('textarea');
-            ta.value = text; ta.style.position='fixed'; ta.style.left='-9999px';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); btn.textContent = '✅ Copié'; btn.classList.add('copied');
-                setTimeout(function(){ btn.textContent = '📋 Copier'; btn.classList.remove('copied'); }, 2000);
-            } catch(err){}
-            document.body.removeChild(ta);
-        }
-    });
+
+            // Append button at the end of the header
+            header.appendChild(document.createTextNode(' '));
+            header.appendChild(btn);
+        });
+    }
+
+    // Run on initial page load
+    if(document.readyState === 'loading')
+        document.addEventListener('DOMContentLoaded', addCopyButtons);
+    else
+        addCopyButtons();
+
+    // Re-run on PJAX navigation (osTicket uses PJAX for page transitions)
+    document.addEventListener('pjax:complete', addCopyButtons);
+    // Also observe DOM changes for lazy-loaded notes
+    if(window.MutationObserver){
+        var observer = new MutationObserver(function(mutations){
+            var check = false;
+            for(var i=0; i<mutations.length; i++){
+                for(var j=0; j<mutations[i].addedNodes.length; j++){
+                    if(mutations[i].addedNodes[j].nodeType === 1){
+                        check = true; break;
+                    }
+                }
+                if(check) break;
+            }
+            if(check) addCopyButtons();
+        });
+        observer.observe(document.body || document.documentElement, {childList: true, subtree: true});
+    }
 })();
 </script>
-HTML;
+SCRIPT;
 
-        return $html;
+        $ost->addExtraHeader($script);
     }
 
     private function sendJsonHeaders() {
