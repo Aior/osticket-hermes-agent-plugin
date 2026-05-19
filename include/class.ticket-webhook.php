@@ -550,7 +550,8 @@ class TicketWebhookPlugin extends Plugin {
 
     private function formatHermesNote($note, array $data) {
         $html = '<div class="hermes-agent-note">';
-        $html .= '<div>' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
+        $html .= '<button type="button" class="hermes-copy-btn" title="Copier la proposition">📋 Copier</button>';
+        $html .= '<div class="hermes-note-body">' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
 
         if (!empty($data['warnings']) && is_array($data['warnings'])) {
             $html .= '<hr><p><strong>Alertes / garde-fous</strong></p><ul>';
@@ -564,6 +565,58 @@ class TicketWebhookPlugin extends Plugin {
         }
 
         $html .= '</div>';
+
+        // Inline CSS + JS for the copy button (scoped to .hermes-agent-note).
+        // Injects only once per page via a flag on the first note rendered.
+        $html .= <<<HTML
+<style>
+.hermes-agent-note { position: relative; padding: 10px 12px; }
+.hermes-copy-btn {
+    position: absolute; top: 6px; right: 8px;
+    background: #f0f4f8; border: 1px solid #c0c8d0; border-radius: 4px;
+    padding: 3px 10px; cursor: pointer; font-size: 13px; z-index: 1;
+    opacity: 0.7; transition: opacity .2s, background .2s;
+}
+.hermes-copy-btn:hover { opacity: 1; background: #e2e8f0; }
+.hermes-copy-btn.copied { background: #d4edda; border-color: #28a745; opacity: 1; }
+.hermes-note-body { margin-top: 4px; }
+</style>
+<script>
+(function(){
+    var styleInjected = false;
+    function injectGlobal(){ if(styleInjected) return; styleInjected = true; }
+
+    document.addEventListener('click', function(e){
+        var btn = e.target.closest('.hermes-copy-btn');
+        if(!btn) return;
+        var note = btn.closest('.hermes-agent-note');
+        if(!note) return;
+        var body = note.querySelector('.hermes-note-body');
+        if(!body) return;
+        // Extract plain text from the note body (strip HTML)
+        var text = body.innerText || body.textContent || '';
+        text = text.trim();
+        if(navigator.clipboard && navigator.clipboard.writeText){
+            navigator.clipboard.writeText(text).then(function(){
+                btn.textContent = '✅ Copié';
+                btn.classList.add('copied');
+                setTimeout(function(){ btn.textContent = '📋 Copier'; btn.classList.remove('copied'); }, 2000);
+            });
+        } else {
+            // Fallback for older browsers / non-HTTPS
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.style.position='fixed'; ta.style.left='-9999px';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); btn.textContent = '✅ Copié'; btn.classList.add('copied');
+                setTimeout(function(){ btn.textContent = '📋 Copier'; btn.classList.remove('copied'); }, 2000);
+            } catch(err){}
+            document.body.removeChild(ta);
+        }
+    });
+})();
+</script>
+HTML;
+
         return $html;
     }
 
