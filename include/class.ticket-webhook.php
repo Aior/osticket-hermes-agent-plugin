@@ -60,10 +60,6 @@ class TicketWebhookPlugin extends Plugin {
                 array($this, 'onThreadEntryCreated'));
             self::$threadEntrySignalConnected = true;
         }
-
-        // Inject the copy-button script into SCP pages (staff panel).
-        // Uses global $ost->addExtraHeader() which renders in <head>.
-        self::injectCopyButtonScript();
     }
 
     /**
@@ -553,11 +549,7 @@ class TicketWebhookPlugin extends Plugin {
     }
 
     private function formatHermesNote($note, array $data) {
-        // Note: osTicket's HtmlThreadEntryBody strips custom CSS classes via
-        // HtmLawed (only 'Mso*' classes survive), so we don't use custom classes here.
-        // The copy button is injected by JS via injectCopyButtonScript() which
-        // identifies Hermes notes by poster name ("IA Agent") in the header.
-        $html = '';
+        $html = '<div class="hermes-agent-note">';
         $html .= '<div>' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
 
         if (!empty($data['warnings']) && is_array($data['warnings'])) {
@@ -571,125 +563,8 @@ class TicketWebhookPlugin extends Plugin {
             $html .= '<hr><pre>' . htmlspecialchars(json_encode($data['metadata'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
         }
 
+        $html .= '</div>';
         return $html;
-    }
-
-    /**
-     * Inject JS + CSS into the SCP staff header to add a copy button
-     * on Hermes internal notes. The script identifies Hermes notes by
-     * matching poster name "IA Agent" or title containing "Proposition SAV"
-     * in the .header div, then appends a 📋 button there.
-     *
-     * Uses $ost->addExtraHeader() to inject the script into <head>,
-     * bypassing osTicket's HTML sanitizer (HtmLawed) which strips
-     * custom classes and <script>/<button> tags from note content.
-     */
-    private static function injectCopyButtonScript() {
-        global $ost;
-        if (!$ost || !method_exists($ost, 'addExtraHeader'))
-            return;
-
-        static $injected = false;
-        if ($injected)
-            return;
-        $injected = true;
-
-        $script = <<<'SCRIPT'
-<style>
-.hermes-copy-btn {
-    border: 1px solid #b0bec5; border-radius: 3px; padding: 2px 8px;
-    background: #eceff1; color: #37474f; cursor: pointer; font-size: 12px;
-    margin-left: 6px; vertical-align: middle; transition: background .2s, border-color .2s;
-}
-.hermes-copy-btn:hover { background: #cfd8dc; border-color: #78909c; }
-.hermes-copy-btn.copied { background: #c8e6c9; border-color: #4caf50; color: #2e7d32; }
-</style>
-<script>
-(function(){
-    // Identify Hermes notes by poster name "IA Agent" and title containing "Proposition SAV"
-    // osTicket strips custom CSS classes from note HTML, so we rely on header text matching.
-    function addCopyButtons(){
-        document.querySelectorAll('.thread-entry').forEach(function(entry){
-            if(entry.dataset.hermesCopyBtn === '1') return;
-            var header = entry.querySelector(':scope > .header');
-            if(!header) return;
-
-            // Match: poster <b>IA Agent</b> OR title containing "Proposition SAV"
-            var poster = header.querySelector('b');
-            var titleEl = header.querySelector('.title, .faded.title');
-            var isHermes = (poster && poster.textContent.trim() === 'IA Agent')
-                        || (titleEl && titleEl.textContent.indexOf('Proposition SAV') !== -1);
-
-            if(!isHermes) return;
-            entry.dataset.hermesCopyBtn = '1';
-
-            var btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'hermes-copy-btn';
-            btn.title = 'Copier la proposition dans le presse-papiers';
-            btn.textContent = '\u{1F4CB} Copier';
-
-            btn.addEventListener('click', function(e){
-                e.preventDefault();
-                e.stopPropagation();
-                // The note body is inside .thread-body within this thread-entry
-                var bodyEl = entry.querySelector(':scope > .thread-body');
-                if(!bodyEl) return;
-                var text = (bodyEl.innerText || bodyEl.textContent || '').trim();
-                if(navigator.clipboard && navigator.clipboard.writeText){
-                    navigator.clipboard.writeText(text).then(function(){
-                        btn.textContent = '\u2705 Copi\u00e9';
-                        btn.classList.add('copied');
-                        setTimeout(function(){ btn.textContent = '\u{1F4CB} Copier'; btn.classList.remove('copied'); }, 2000);
-                    });
-                } else {
-                    var ta = document.createElement('textarea');
-                    ta.value = text; ta.style.position='fixed'; ta.style.left='-9999px';
-                    document.body.appendChild(ta); ta.select();
-                    try {
-                        document.execCommand('copy');
-                        btn.textContent = '\u2705 Copi\u00e9'; btn.classList.add('copied');
-                        setTimeout(function(){ btn.textContent = '\u{1F4CB} Copier'; btn.classList.remove('copied'); }, 2000);
-                    } catch(err){}
-                    document.body.removeChild(ta);
-                }
-            });
-
-            // Append button at the end of the header
-            header.appendChild(document.createTextNode(' '));
-            header.appendChild(btn);
-        });
-    }
-
-    // Run on initial page load
-    if(document.readyState === 'loading')
-        document.addEventListener('DOMContentLoaded', addCopyButtons);
-    else
-        addCopyButtons();
-
-    // Re-run on PJAX navigation (osTicket uses PJAX for page transitions)
-    document.addEventListener('pjax:complete', addCopyButtons);
-    // Also observe DOM changes for lazy-loaded notes
-    if(window.MutationObserver){
-        var observer = new MutationObserver(function(mutations){
-            var check = false;
-            for(var i=0; i<mutations.length; i++){
-                for(var j=0; j<mutations[i].addedNodes.length; j++){
-                    if(mutations[i].addedNodes[j].nodeType === 1){
-                        check = true; break;
-                    }
-                }
-                if(check) break;
-            }
-            if(check) addCopyButtons();
-        });
-        observer.observe(document.body || document.documentElement, {childList: true, subtree: true});
-    }
-})();
-</script>
-SCRIPT;
-
-        $ost->addExtraHeader($script);
     }
 
     private function sendJsonHeaders() {
