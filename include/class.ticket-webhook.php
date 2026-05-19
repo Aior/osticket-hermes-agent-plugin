@@ -553,8 +553,12 @@ class TicketWebhookPlugin extends Plugin {
     }
 
     private function formatHermesNote($note, array $data) {
-        $html = '<div class="hermes-agent-note">';
-        $html .= '<div class="hermes-note-body">' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
+        // Note: osTicket's HtmlThreadEntryBody strips custom CSS classes via
+        // HtmLawed (only 'Mso*' classes survive), so we don't use custom classes here.
+        // The copy button is injected by JS via injectCopyButtonScript() which
+        // identifies Hermes notes by poster name ("IA Agent") in the header.
+        $html = '';
+        $html .= '<div>' . nl2br(htmlspecialchars($note, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) . '</div>';
 
         if (!empty($data['warnings']) && is_array($data['warnings'])) {
             $html .= '<hr><p><strong>Alertes / garde-fous</strong></p><ul>';
@@ -567,16 +571,18 @@ class TicketWebhookPlugin extends Plugin {
             $html .= '<hr><pre>' . htmlspecialchars(json_encode($data['metadata'], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '</pre>';
         }
 
-        $html .= '</div>';
-
         return $html;
     }
 
     /**
      * Inject JS + CSS into the SCP staff header to add a copy button
-     * on Hermes internal notes. The script detects .hermes-agent-note
-     * elements inside .thread-entry and appends a 📋 button into the
-     * .header div of the parent thread-entry.
+     * on Hermes internal notes. The script identifies Hermes notes by
+     * matching poster name "IA Agent" or title containing "Proposition SAV"
+     * in the .header div, then appends a 📋 button there.
+     *
+     * Uses $ost->addExtraHeader() to inject the script into <head>,
+     * bypassing osTicket's HTML sanitizer (HtmLawed) which strips
+     * custom classes and <script>/<button> tags from note content.
      */
     private static function injectCopyButtonScript() {
         // Only inject on SCP pages (staff panel)
@@ -604,17 +610,22 @@ class TicketWebhookPlugin extends Plugin {
 </style>
 <script>
 (function(){
+    // Identify Hermes notes by poster name "IA Agent" and title containing "Proposition SAV"
+    // osTicket strips custom CSS classes from note HTML, so we rely on header text matching.
     function addCopyButtons(){
-        document.querySelectorAll('.hermes-agent-note').forEach(function(note){
-            // Avoid duplicate buttons
-            if(note.dataset.copyBtn === '1') return;
-            note.dataset.copyBtn = '1';
-
-            var entry = note.closest('.thread-entry');
-            if(!entry) return;
-
+        document.querySelectorAll('.thread-entry').forEach(function(entry){
+            if(entry.dataset.hermesCopyBtn === '1') return;
             var header = entry.querySelector(':scope > .header');
             if(!header) return;
+
+            // Match: poster <b>IA Agent</b> OR title containing "Proposition SAV"
+            var poster = header.querySelector('b');
+            var titleEl = header.querySelector('.title, .faded.title');
+            var isHermes = (poster && poster.textContent.trim() === 'IA Agent')
+                        || (titleEl && titleEl.textContent.indexOf('Proposition SAV') !== -1);
+
+            if(!isHermes) return;
+            entry.dataset.hermesCopyBtn = '1';
 
             var btn = document.createElement('button');
             btn.type = 'button';
@@ -625,9 +636,10 @@ class TicketWebhookPlugin extends Plugin {
             btn.addEventListener('click', function(e){
                 e.preventDefault();
                 e.stopPropagation();
-                var body = note.querySelector('.hermes-note-body');
-                if(!body) return;
-                var text = (body.innerText || body.textContent || '').trim();
+                // The note body is inside .thread-body within this thread-entry
+                var bodyEl = entry.querySelector(':scope > .thread-body');
+                if(!bodyEl) return;
+                var text = (bodyEl.innerText || bodyEl.textContent || '').trim();
                 if(navigator.clipboard && navigator.clipboard.writeText){
                     navigator.clipboard.writeText(text).then(function(){
                         btn.textContent = '\u2705 Copi\u00e9';
