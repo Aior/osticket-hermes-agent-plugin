@@ -264,12 +264,17 @@ class TicketWebhookPlugin extends Plugin {
         if (!$message || !is_object($message))
             return null;
 
-        return array(
+        $info = array(
             'id'      => method_exists($message, 'getId') ? $message->getId() : null,
             'title'   => method_exists($message, 'getTitle') ? self::safeString($message->getTitle()) : null,
             'body'    => method_exists($message, 'getBody') ? self::safeString($message->getBody()) : null,
             'created' => method_exists($message, 'getCreateDate') ? $message->getCreateDate() : null,
         );
+
+        // --- Attachments (non-inline) ---
+        $info['attachments'] = $this->getEntryAttachments($message);
+
+        return $info;
     }
 
     private function getThreadEntryInfo($entry) {
@@ -279,7 +284,7 @@ class TicketWebhookPlugin extends Plugin {
         $user = method_exists($entry, 'getUser') ? $entry->getUser() : null;
         $staff = method_exists($entry, 'getStaff') ? $entry->getStaff() : null;
 
-        return array(
+        $info = array(
             'id'        => method_exists($entry, 'getId') ? $entry->getId() : null,
             'parent_id' => method_exists($entry, 'getPid') ? $entry->getPid() : null,
             'type'      => method_exists($entry, 'getType') ? $entry->getType() : null,
@@ -296,6 +301,51 @@ class TicketWebhookPlugin extends Plugin {
                 'email' => $user && method_exists($user, 'getEmail') ? $user->getEmail() : ($staff && method_exists($staff, 'getEmail') ? $staff->getEmail() : null),
             ),
         );
+
+        // --- Attachments (non-inline) ---
+        $info['attachments'] = $this->getEntryAttachments($entry);
+
+        return $info;
+    }
+
+    /**
+     * Collect non-inline attachments for a thread entry.
+     * Returns an array of {name, mime, size, key, url} for each file.
+     */
+    private function getEntryAttachments($entry) {
+        if (!method_exists($entry, 'getId') || !class_exists('Attachment'))
+            return array();
+
+        $attachments = Attachment::objects()->filter(array(
+            'type'         => 'H',
+            'object_id'    => $entry->getId(),
+            'inline'       => 0,
+        ));
+
+        global $ost;
+        $baseUrl = ($ost && $ost->getConfig())
+            ? rtrim($ost->getConfig()->getBaseUrl(), '/')
+            : '';
+
+        $list = array();
+        foreach ($attachments as $a) {
+            $file = $a->getFile();
+            if (!$file) continue;
+
+            $key  = method_exists($file, 'getKey')      ? $file->getKey()      : null;
+            $name = method_exists($file, 'getName')     ? $file->getName()     : null;
+            $mime = method_exists($file, 'getMimeType')  ? $file->getMimeType() : null;
+            $size = method_exists($file, 'getSize')      ? $file->getSize()     : null;
+
+            $list[] = array(
+                'name' => $name,
+                'mime' => $mime,
+                'size' => $size,
+                'key'  => $key,
+                'url'  => $key ? $baseUrl . '/file.php?key=' . $key : null,
+            );
+        }
+        return $list;
     }
 
     private function getThreadHistory($ticket, $limit=12) {
