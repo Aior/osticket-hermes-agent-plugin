@@ -316,6 +316,20 @@ class TicketWebhookPlugin extends Plugin {
         if (!method_exists($entry, 'getId') || !class_exists('Attachment'))
             return array();
 
+        // DEBUG: check ALL attachments for this entry (including inline)
+        $allAttachments = Attachment::objects()->filter(array(
+            'type'      => 'H',
+            'object_id' => $entry->getId(),
+        ));
+        self::log('DEBUG getEntryAttachments: entry_id=' . $entry->getId()
+            . ' total_attachments=' . count($allAttachments));
+        foreach ($allAttachments as $a) {
+            $f = $a->getFile();
+            self::log('DEBUG attachment: name=' . ($f && method_exists($f, 'getName') ? $f->getName() : '?')
+                . ' inline=' . var_export($a->inline, true)
+                . ' type_id=' . var_export(method_exists($a, 'getTypeId') ? $a->getTypeId() : '?', true));
+        }
+
         $attachments = Attachment::objects()->filter(array(
             'type'         => 'H',
             'object_id'    => $entry->getId(),
