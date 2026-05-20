@@ -316,30 +316,11 @@ class TicketWebhookPlugin extends Plugin {
         if (!method_exists($entry, 'getId') || !class_exists('Attachment'))
             return array();
 
-        // DEBUG: check ALL attachments for this entry (including inline)
-        $allAttachments = Attachment::objects()->filter(array(
-            'type'      => 'H',
-            'object_id' => $entry->getId(),
-        ));
-        self::log('DEBUG getEntryAttachments: entry_id=' . $entry->getId()
-            . ' total_attachments=' . count($allAttachments));
-        foreach ($allAttachments as $a) {
-            $f = $a->getFile();
-            self::log('DEBUG attachment: name=' . ($f && method_exists($f, 'getName') ? $f->getName() : '?')
-                . ' inline=' . var_export($a->inline, true)
-                . ' type_id=' . var_export(method_exists($a, 'getTypeId') ? $a->getTypeId() : '?', true));
-        }
-
         $attachments = Attachment::objects()->filter(array(
             'type'         => 'H',
             'object_id'    => $entry->getId(),
             'inline'       => 0,
         ));
-
-        global $ost;
-        $baseUrl = ($ost && $ost->getConfig())
-            ? rtrim($ost->getConfig()->getBaseUrl(), '/')
-            : '';
 
         $list = array();
         foreach ($attachments as $a) {
@@ -351,12 +332,21 @@ class TicketWebhookPlugin extends Plugin {
             $mime = method_exists($file, 'getMimeType')  ? $file->getMimeType() : null;
             $size = method_exists($file, 'getSize')      ? $file->getSize()     : null;
 
+            // Use osTicket's signed download URL (key + signature + expires)
+            // file.php requires all 3 params — a bare ?key=... returns 404.
+            $url = null;
+            if (method_exists($file, 'getDownloadUrl')) {
+                $url = $file->getDownloadUrl();
+            } elseif (method_exists($file, 'getExternalDownloadUrl')) {
+                $url = $file->getExternalDownloadUrl();
+            }
+
             $list[] = array(
                 'name' => $name,
                 'mime' => $mime,
                 'size' => $size,
                 'key'  => $key,
-                'url'  => $key ? $baseUrl . '/file.php?key=' . $key : null,
+                'url'  => $url,
             );
         }
         return $list;
