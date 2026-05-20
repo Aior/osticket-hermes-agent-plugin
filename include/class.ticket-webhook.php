@@ -332,8 +332,18 @@ class TicketWebhookPlugin extends Plugin {
             $mime = method_exists($file, 'getMimeType')  ? $file->getMimeType() : null;
             $size = method_exists($file, 'getSize')      ? $file->getSize()     : null;
 
-            // Use osTicket's signed download URL (key + signature + expires)
-            // file.php requires all 3 params — a bare ?key=... returns 404.
+            // Read file content directly and send as base64 in the payload.
+            // This avoids authentication issues — file.php requires a
+            // signed URL + session, which Hermes doesn't have.
+            $data_b64 = null;
+            if (method_exists($file, 'getData') || method_exists($file, 'getContents')) {
+                $raw = method_exists($file, 'getData') ? $file->getData() : $file->getContents();
+                if ($raw !== false && strlen($raw) > 0)
+                    $data_b64 = base64_encode($raw);
+                unset($raw); // free memory
+            }
+
+            // Also provide a signed download URL as fallback / reference
             $url = null;
             if (method_exists($file, 'getDownloadUrl')) {
                 $url = $file->getDownloadUrl();
@@ -342,11 +352,12 @@ class TicketWebhookPlugin extends Plugin {
             }
 
             $list[] = array(
-                'name' => $name,
-                'mime' => $mime,
-                'size' => $size,
-                'key'  => $key,
-                'url'  => $url,
+                'name'      => $name,
+                'mime'      => $mime,
+                'size'      => $size,
+                'key'       => $key,
+                'url'       => $url,
+                'data_b64'  => $data_b64,
             );
         }
         return $list;
