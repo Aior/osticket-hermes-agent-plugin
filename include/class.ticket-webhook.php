@@ -323,6 +323,7 @@ class TicketWebhookPlugin extends Plugin {
         ));
 
         $list = array();
+        $max_b64_bytes = 2 * 1024 * 1024; // 2MB max per file in base64
         foreach ($attachments as $a) {
             $file = $a->getFile();
             if (!$file) continue;
@@ -332,15 +333,22 @@ class TicketWebhookPlugin extends Plugin {
             $mime = method_exists($file, 'getMimeType')  ? $file->getMimeType() : null;
             $size = method_exists($file, 'getSize')      ? $file->getSize()     : null;
 
-            // Read file content directly and send as base64 in the payload.
-            // This avoids authentication issues — file.php requires a
-            // signed URL + session, which Hermes doesn't have.
+            // Skip images — LLM can't see them via text and they bloat the payload.
+            // Send only PDF, text, CSV, and other document types as base64.
+            $is_image = $mime && strpos(strtolower($mime), 'image/') === 0;
+
             $data_b64 = null;
-            if (method_exists($file, 'getData') || method_exists($file, 'getContents')) {
-                $raw = method_exists($file, 'getData') ? $file->getData() : $file->getContents();
-                if ($raw !== false && strlen($raw) > 0)
-                    $data_b64 = base64_encode($raw);
-                unset($raw); // free memory
+            if (!$is_image && ($size === null || $size <= $max_b64_bytes)) {
+                try {
+                    $raw = method_exists($file, 'getData') ? $file->getData() : $file->getContents();
+                    if ($raw !== false && strlen($raw) > 0)
+                        $data_b64 = base64_encode($raw);
+                    unset($raw);
+                } catch (\Exception $e) {
+                    // Log but don't crash — skip this attachment's data
+                    self::log('getData() failed for ' . $name . ': ' . $e->getMessage());
+                    $data_b64 = null;
+                }
             }
 
             // Also provide a signed download URL as fallback / reference
