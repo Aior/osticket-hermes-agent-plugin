@@ -533,6 +533,12 @@ class TicketWebhookPlugin extends Plugin {
         $dispatcher->append(
             url_post('^/hermes/note$', array($this, 'postHermesNote'))
         );
+        $dispatcher->append(
+            url_post('^/hermes/transfer$', array($this, 'postHermesTransfer'))
+        );
+        $dispatcher->append(
+            url_get('^/hermes/departments$', array($this, 'getHermesDepartments'))
+        );
     }
 
     function postHermesNote() {
@@ -587,6 +593,140 @@ class TicketWebhookPlugin extends Plugin {
             'ok' => true,
             'ticket_id' => $ticketId,
             'note_id' => method_exists($entry, 'getId') ? $entry->getId() : null,
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    //  Hermes callback API: POST /api/http.php/hermes/transfer
+    //
+    //  Transfers a ticket to a different department and optionally
+    //  posts an internal note explaining the transfer reason.
+    //
+    //  Payload: { ticket_id: int, dept_id: int, reason?: string }
+    //  Returns: { ok: true, ticket_id, old_dept_id, new_dept_id, new_dept_name }
+    // ------------------------------------------------------------------
+
+    function postHermesTransfer() {
+        $this->sendJsonHeaders();
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST')
+            return $this->jsonResponse(405, array('ok' => false, 'error' => 'method_not_allowed'));
+
+        $secret = $this->getRequestSecret();
+        if (!$secret)
+            return $this->jsonResponse(401, array('ok' => false, 'error' => 'missing_secret'));
+
+        $config = $this->findConfigByHermesSecret($secret);
+        if (!$config)
+            return $this->jsonResponse(403, array('ok' => false, 'error' => 'invalid_secret'));
+
+        $raw = file_get_contents('php://input');
+        $data = json_decode($raw, true);
+        if (!is_array($data))
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'invalid_json'));
+
+        $ticketId = isset($data['ticket_id']) ? (int) $data['ticket_id'] : 0;
+        $deptId   = isset($data['dept_id']) ? (int) $data['dept_id'] : 0;
+
+        if (!$ticketId)
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_ticket_id'));
+        if (!$deptId)
+            return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_dept_id'));
+
+        $ticket = Ticket::lookup($ticketId);
+        if (!$ticket)
+            return $this->jsonResponse(404, array('ok' => false, 'error' => 'ticket_not_found'));
+
+        $newDept = Dept::lookup($deptId);
+        if (!$newDept)
+            return $this->jsonResponse(404, array('ok' => false, 'error' => 'dept_not_found'));
+
+        $oldDeptId = (int) $ticket->getDeptId();
+
+        // Already in the target department — nothing to do
+        if ($oldDeptId === $deptId)
+            return $this->jsonResponse(200, array(
+                'ok' => true,
+                'ticket_id' => $ticketId,
+                'old_dept_id' => $oldDeptId,
+                'new_dept_id' => $deptId,
+                'message' => 'ticket_already_in_department',
+            ));
+
+        // Transfer the ticket using setDeptId
+        $result = $ticket->setDeptId($deptId);
+        if (!$result) {
+            return $this->jsonResponse(500, array(
+                'ok' => false,
+                'error' => 'transfer_failed',
+                'details' => 'setDeptId returned false — check department ID and permissions',
+            ));
+        }
+
+        // Log the transfer event in the ticket thread
+        $reason = trim($data['reason'] ?? 'Transfert automatique par Hermes Agent');
+        $oldDept = Dept::lookup($oldDeptId);
+        $oldDeptName = $oldDept ? self::safeString($oldDept->getName()) : ('Dept #' . $oldDeptId);
+        $newDeptName = self::safeString($newDept->getName());
+
+        $noteBody = sprintf(
+            "Transfert de département : %s → %s.\n%s",
+            $oldDeptName, $newDeptName, $reason
+        );
+        $poster = trim($config->get('note-poster') ?: 'Hermes Agent');
+        $errors = array();
+        $ticket->postNote(array(
+            'title' => 'Transfert de département — ' . $newDeptName,
+            'note' => new HtmlThreadEntryBody($this->formatHermesNote($noteBody, $data)),
+            'activity' => 'Hermes Agent: ticket transferred to ' . $newDeptName,
+        ), $errors, $poster, false);
+
+        if ($errors)
+            self::log('Note after transfer had errors: ' . json_encode($errors));
+
+        return $this->jsonResponse(200, array(
+            'ok' => true,
+            'ticket_id' => $ticketId,
+            'old_dept_id' => $oldDeptId,
+            'old_dept_name' => $oldDeptName,
+            'new_dept_id' => $deptId,
+            'new_dept_name' => $newDeptName,
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    //  Hermes callback API: GET /api/http.php/hermes/departments
+    //
+    //  Returns the list of active departments (id + name) so Hermes
+    //  can map department names to IDs for transfer operations.
+    // ------------------------------------------------------------------
+
+    function getHermesDepartments() {
+        $this->sendJsonHeaders();
+
+        if ($_SERVER['REQUEST_METHOD'] !== 'GET')
+            return $this->jsonResponse(405, array('ok' => false, 'error' => 'method_not_allowed'));
+
+        $secret = $this->getRequestSecret();
+        if (!$secret)
+            return $this->jsonResponse(401, array('ok' => false, 'error' => 'missing_secret'));
+
+        $config = $this->findConfigByHermesSecret($secret);
+        if (!$config)
+            return $this->jsonResponse(403, array('ok' => false, 'error' => 'invalid_secret'));
+
+        $depts = Dept::getDepartments(null, true, false);
+        $result = array();
+        foreach ($depts as $id => $name) {
+            $result[] = array(
+                'id' => (int) $id,
+                'name' => self::safeString($name),
+            );
+        }
+
+        return $this->jsonResponse(200, array(
+            'ok' => true,
+            'departments' => $result,
         ));
     }
 
