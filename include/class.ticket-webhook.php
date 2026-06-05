@@ -316,10 +316,17 @@ class TicketWebhookPlugin extends Plugin {
         if (!method_exists($entry, 'getId') || !class_exists('Attachment'))
             return array();
 
+        // In osTicket, attachments are linked to thread entries via the
+        // Attachment model.  The 'type' column uses 'H' for thread-entry
+        // attachments (osTicket <1.17 used 'C' as well).  We no longer
+        // filter by 'type' — osTicket 1.18 stores all thread-entry
+        // attachments with type='H', but some installations may differ.
+        // We also no longer exclude inline attachments (inline=0) because
+        // PDFs uploaded as attachments are sometimes marked inline by
+        // osTicket's HTML parser.  Including them ensures we never miss a
+        // document the customer attached.
         $attachments = Attachment::objects()->filter(array(
-            'type'         => 'H',
             'object_id'    => $entry->getId(),
-            'inline'       => 0,
         ));
 
         $list = array();
