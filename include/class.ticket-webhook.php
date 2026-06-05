@@ -340,12 +340,12 @@ class TicketWebhookPlugin extends Plugin {
             $mime = method_exists($file, 'getMimeType')  ? $file->getMimeType() : null;
             $size = method_exists($file, 'getSize')      ? $file->getSize()     : null;
 
-            // Skip images — LLM can't see them via text and they bloat the payload.
-            // Send only PDF, text, CSV, and other document types as base64.
-            $is_image = $mime && strpos(strtolower($mime), 'image/') === 0;
-
+            // Skip very large files that would bloat the payload.
+            // Images are included so the vision LLM can read them.
+            // PDFs, text, CSV etc. are also included for text extraction
+            // on the Hermes side (via pymupdf rendering to image + vision).
             $data_b64 = null;
-            if (!$is_image && ($size === null || $size <= $max_b64_bytes)) {
+            if ($size === null || $size <= $max_b64_bytes) {
                 try {
                     $raw = method_exists($file, 'getData') ? $file->getData() : $file->getContents();
                     if ($raw !== false && strlen($raw) > 0)
