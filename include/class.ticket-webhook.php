@@ -38,6 +38,9 @@ class TicketWebhookPlugin extends Plugin {
     /** Ensures the thread-entry signal handler is registered only once per request. */
     private static $threadEntrySignalConnected = false;
 
+    /** Ensures the SCP header JS injection is registered only once per request. */
+    private static $scpHeaderConnected = false;
+
     /**
      * Called once per enabled instance during osTicket bootstrap.
      * Registers the ticket.created signal handler.
@@ -59,6 +62,13 @@ class TicketWebhookPlugin extends Plugin {
             Signal::connect('threadentry.created',
                 array($this, 'onThreadEntryCreated'));
             self::$threadEntrySignalConnected = true;
+        }
+
+        // Inject copy-button JS into SCP pages (staff ticket view)
+        if (!self::$scpHeaderConnected) {
+            Signal::connect('scp.header',
+                array($this, 'onScpHeader'));
+            self::$scpHeaderConnected = true;
         }
     }
 
@@ -113,6 +123,28 @@ class TicketWebhookPlugin extends Plugin {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  SCP JS injection — copy button for Hermes notes
+    // ------------------------------------------------------------------
+
+    /**
+     * Signal handler for scp.header — injects the copy-button JavaScript
+     * into the staff control panel pages. The script detects .hermes-agent-note
+     * elements and adds a "Copier" button to each, allowing operators to
+     * copy the proposal text with one click.
+     */
+    function onScpHeader($ost) {
+        $pluginDir = dirname(__FILE__);
+        $jsFile = $pluginDir . '/hermes-copy.js';
+        if (!file_exists($jsFile))
+            return;
+
+        // Output a <script> tag pointing to the plugin's JS file
+        // osTicket SCP pages use relative URLs from /scp/
+        $pluginPath = preg_replace('#.*/include/plugins/#', 'include/plugins/', $pluginDir);
+        echo '<script type="text/javascript" src="' . htmlspecialchars($pluginPath . '/hermes-copy.js') . '"></script>' . "\n";
     }
 
     // ------------------------------------------------------------------
