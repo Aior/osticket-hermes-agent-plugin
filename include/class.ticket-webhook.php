@@ -64,10 +64,25 @@ class TicketWebhookPlugin extends Plugin {
             self::$threadEntrySignalConnected = true;
         }
 
-        // Inject copy-button JS into SCP ticket view pages
+        // Inject copy-button JS into SCP pages via addExtraHeader.
+        // bootstrap() runs during main.inc.php (before header rendering),
+        // so the script tag lands in <head>. We detect SCP pages by checking
+        // if the request comes from /scp/ — OSTSCPINC is not yet defined at
+        // this point. The JS is a no-op on pages without .hermes-agent-note.
         if (!self::$scpHeaderConnected) {
-            Signal::connect('object.view',
-                array($this, 'onObjectView'));
+            global $ost;
+            $isScp = (strpos($_SERVER['SCRIPT_NAME'] ?? '', '/scp/') !== false);
+            if ($isScp && $ost && method_exists($ost, 'addExtraHeader')) {
+                $pluginDir = dirname(__FILE__);
+                $jsFile = $pluginDir . '/hermes-copy.js';
+                if (file_exists($jsFile)) {
+                    $pluginName = basename(dirname($pluginDir));
+                    $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
+                    $script = '<script type="text/javascript" src="'
+                        . htmlspecialchars($src) . '"></script>';
+                    $ost->addExtraHeader($script, $script);
+                }
+            }
             self::$scpHeaderConnected = true;
         }
     }
@@ -123,36 +138,6 @@ class TicketWebhookPlugin extends Plugin {
                 );
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    //  SCP JS injection — copy button for Hermes notes
-    // ------------------------------------------------------------------
-
-    /**
-     * Signal handler for object.view — fires when a staff member views a
-     * ticket in the SCP. Injects the copy-button JavaScript via addExtraHeader.
-     * The script detects .hermes-agent-note elements and adds a "Copier" button.
-     */
-    function onObjectView($ticket, $type=null) {
-        global $ost;
-        if (!$ost || !method_exists($ost, 'addExtraHeader'))
-            return;
-
-        $pluginDir = dirname(__FILE__);
-        $jsFile = $pluginDir . '/hermes-copy.js';
-        if (!file_exists($jsFile))
-            return;
-
-        // Build the script tag with ROOT_PATH for correct URL resolution
-        // The plugin is under include/plugins/<plugin-name>/
-        $pluginName = basename(dirname($pluginDir));
-        $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
-        $script = '<script type="text/javascript" src="' . htmlspecialchars($src) . '"></script>';
-
-        // addExtraHeader($header, $pjax_script) — the pjax param allows
-        // the script to be re-injected on PJAX navigation between tickets
-        $ost->addExtraHeader($script, $script);
     }
 
     // ------------------------------------------------------------------
