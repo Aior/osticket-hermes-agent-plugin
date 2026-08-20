@@ -64,10 +64,10 @@ class TicketWebhookPlugin extends Plugin {
             self::$threadEntrySignalConnected = true;
         }
 
-        // Inject copy-button JS into SCP pages (staff ticket view)
+        // Inject copy-button JS into SCP ticket view pages
         if (!self::$scpHeaderConnected) {
-            Signal::connect('scp.header',
-                array($this, 'onScpHeader'));
+            Signal::connect('object.view',
+                array($this, 'onObjectView'));
             self::$scpHeaderConnected = true;
         }
     }
@@ -130,21 +130,29 @@ class TicketWebhookPlugin extends Plugin {
     // ------------------------------------------------------------------
 
     /**
-     * Signal handler for scp.header — injects the copy-button JavaScript
-     * into the staff control panel pages. The script detects .hermes-agent-note
-     * elements and adds a "Copier" button to each, allowing operators to
-     * copy the proposal text with one click.
+     * Signal handler for object.view — fires when a staff member views a
+     * ticket in the SCP. Injects the copy-button JavaScript via addExtraHeader.
+     * The script detects .hermes-agent-note elements and adds a "Copier" button.
      */
-    function onScpHeader($ost) {
+    function onObjectView($ticket, $type=null) {
+        global $ost;
+        if (!$ost || !method_exists($ost, 'addExtraHeader'))
+            return;
+
         $pluginDir = dirname(__FILE__);
         $jsFile = $pluginDir . '/hermes-copy.js';
         if (!file_exists($jsFile))
             return;
 
-        // Output a <script> tag pointing to the plugin's JS file
-        // osTicket SCP pages use relative URLs from /scp/
-        $pluginPath = preg_replace('#.*/include/plugins/#', 'include/plugins/', $pluginDir);
-        echo '<script type="text/javascript" src="' . htmlspecialchars($pluginPath . '/hermes-copy.js') . '"></script>' . "\n";
+        // Build the script tag with ROOT_PATH for correct URL resolution
+        // The plugin is under include/plugins/<plugin-name>/
+        $pluginName = basename(dirname($pluginDir));
+        $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
+        $script = '<script type="text/javascript" src="' . htmlspecialchars($src) . '"></script>';
+
+        // addExtraHeader($header, $pjax_script) — the pjax param allows
+        // the script to be re-injected on PJAX navigation between tickets
+        $ost->addExtraHeader($script, $script);
     }
 
     // ------------------------------------------------------------------
