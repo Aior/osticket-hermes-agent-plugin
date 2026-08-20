@@ -64,25 +64,15 @@ class TicketWebhookPlugin extends Plugin {
             self::$threadEntrySignalConnected = true;
         }
 
-        // Inject copy-button JS into SCP pages via addExtraHeader.
-        // bootstrap() runs during main.inc.php (before header rendering),
-        // so the script tag lands in <head>. We detect SCP pages by checking
-        // if the request comes from /scp/ — OSTSCPINC is not yet defined at
-        // this point. The JS is a no-op on pages without .hermes-agent-note.
+        // Inject copy-button JS when a staff member views a ticket.
+        // We listen on 'object.view' (fired in ticket-view.inc.php) and
+        // echo the <script> directly — addExtraHeader() doesn't work here
+        // because global $ost is not yet in scope during plugin bootstrap().
+        // The echo lands inside #pjax-container, but browsers execute
+        // <script src> tags regardless of position in the DOM.
         if (!self::$scpHeaderConnected) {
-            global $ost;
-            $isScp = (strpos($_SERVER['SCRIPT_NAME'] ?? '', '/scp/') !== false);
-            if ($isScp && $ost && method_exists($ost, 'addExtraHeader')) {
-                $pluginDir = dirname(__FILE__);
-                $jsFile = $pluginDir . '/hermes-copy.js';
-                if (file_exists($jsFile)) {
-                    $pluginName = basename(dirname($pluginDir));
-                    $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
-                    $script = '<script type="text/javascript" src="'
-                        . htmlspecialchars($src) . '"></script>';
-                    $ost->addExtraHeader($script, $script);
-                }
-            }
+            Signal::connect('object.view',
+                array($this, 'onObjectView'));
             self::$scpHeaderConnected = true;
         }
     }
@@ -138,6 +128,28 @@ class TicketWebhookPlugin extends Plugin {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    //  SCP JS injection — copy button for Hermes notes
+    // ------------------------------------------------------------------
+
+    /**
+     * Signal handler for object.view — fires in ticket-view.inc.php when
+     * a staff member opens a ticket. Echoes a <script src> tag directly.
+     * Browsers execute <script src> regardless of DOM position, so this
+     * works even inside #pjax-container.
+     */
+    function onObjectView($ticket, $type=null) {
+        $pluginDir = dirname(__FILE__);
+        $jsFile = $pluginDir . '/hermes-copy.js';
+        if (!file_exists($jsFile))
+            return;
+
+        $pluginName = basename(dirname($pluginDir));
+        $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
+        echo '<script type="text/javascript" src="'
+            . htmlspecialchars($src) . '"></script>' . "\n";
     }
 
     // ------------------------------------------------------------------
