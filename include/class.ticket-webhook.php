@@ -475,6 +475,19 @@ class TicketWebhookPlugin extends Plugin {
             'User-Agent: osTicket-Webhook/1.0',
         );
 
+        // --- HMAC V2 signature (Hermes gateway) ---
+        // X-Webhook-Signature-V2 = hex HMAC-SHA256 of "<timestamp>.<body>",
+        // with X-Webhook-Timestamp (unix seconds) sent alongside. Replaces
+        // the replay-vulnerable body-only V1 signature; Hermes v0.21.x
+        // validates V2 first and keeps V1 for legacy senders only.
+        $hmacSecret = trim($config->get('webhook-signature-secret') ?: '');
+        if ($hmacSecret && function_exists('hash_hmac')) {
+            $timestamp = (string) time();
+            $signature = hash_hmac('sha256', $timestamp . '.' . $json, $hmacSecret);
+            $headers[] = 'X-Webhook-Timestamp: ' . $timestamp;
+            $headers[] = 'X-Webhook-Signature-V2: ' . $signature;
+        }
+
         $customHeader = trim($config->get('webhook-custom-header') ?: '');
         if ($customHeader)
             $headers[] = $customHeader;
@@ -908,6 +921,13 @@ class TicketWebhookConfig extends PluginConfig {
                 'hint'     => 'Full Hermes Gateway URL that receives ticket.created and ticket.client_reply events (e.g. http://hermes.example.com:8644/webhooks/osticket-hermes).',
                 'required' => true,
                 'configuration' => array('size' => 80, 'length' => 512),
+            )),
+            'webhook-signature-secret' => new PasswordField(array(
+                'label'    => 'Webhook HMAC Secret (V2)',
+                'hint'     => 'Shared secret for signing outbound webhooks. Must match the route secret configured on the Hermes gateway. Signs X-Webhook-Signature-V2 = HMAC-SHA256 of "<timestamp>.<body>" (with X-Webhook-Timestamp header). Leave empty to send unsigned webhooks (rejected by Hermes routes with a secret).',
+                'required' => false,
+                'widget'   => 'PasswordWidget',
+                'configuration' => array('size' => 64, 'length' => 256),
             )),
             'hermes-secret' => new PasswordField(array(
                 'label'    => 'Hermes Shared Secret',
