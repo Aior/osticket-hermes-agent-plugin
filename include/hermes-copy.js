@@ -75,8 +75,15 @@
 
   function isHermesEntry(entryEl) {
     if (entryEl.querySelector('.hermes-agent-note')) return true;
-    var title = entryEl.querySelector('.header .title, header .title');
-    return !!(title && TITLE_RE.test(title.textContent));
+    // NB: the header contains SEVERAL .title elements — osTicket's action
+    // dropdown renders a <ul class="title"> ("Create Ticket / Create Task")
+    // BEFORE the real <span class="title">. querySelector('.title') grabs
+    // the dropdown, not the entry title — test them all instead.
+    var titles = entryEl.querySelectorAll('.header .title, header .title');
+    for (var i = 0; i < titles.length; i++) {
+      if (TITLE_RE.test(titles[i].textContent)) return true;
+    }
+    return false;
   }
 
   function addCopyButton(entryEl) {
