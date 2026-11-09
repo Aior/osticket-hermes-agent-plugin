@@ -1,9 +1,17 @@
 /**
  * Hermes Agent Note — Copy Button
  *
- * Injected into osTicket SCP pages via Signal::connect('scp.header').
- * Detects .hermes-agent-note elements and adds a "Copier" button to each.
- * Uses MutationObserver to handle dynamically loaded thread entries.
+ * Injected into osTicket SCP ticket view pages by the plugin
+ * (class.ticket-webhook.php, onObjectView). Finds Hermes proposal
+ * thread entries and adds a "Copier" button in the entry HEADER
+ * (next to the dropdown caret), copying the proposal text only —
+ * never the warnings block or the JSON metadata.
+ *
+ * Detection (either one):
+ *   - body contains .hermes-agent-note  (new notes, if the class
+ *     survives osTicket's HTML Purifier)
+ *   - header title matches /Proposition Hermes/ (older notes)
+ *
  * No inline JS — pure event delegation, CSP-safe.
  */
 (function () {
@@ -12,6 +20,8 @@
   var BUTTON_LABEL = 'Copier';
   var BUTTON_DONE = 'Copié !';
   var BUTTON_CLASS = 'hermes-copy-btn';
+  var MARKER_CLASS = 'hermes-copy-processed';
+  var TITLE_RE = /Proposition Hermes/i;
 
   // Inject styles once
   if (!document.getElementById('hermes-copy-styles')) {
@@ -19,11 +29,12 @@
     style.id = 'hermes-copy-styles';
     style.textContent = [
       '.' + BUTTON_CLASS + ' {',
-      '  display: inline-block;',
-      '  padding: 2px 10px;',
-      '  margin: 0 0 8px 0;',
+      '  float: right;',
+      '  margin: 1px 6px 1px 0;',
+      '  padding: 1px 8px;',
       '  font-size: 11px;',
       '  font-weight: 600;',
+      '  line-height: 16px;',
       '  color: #fff;',
       '  background: #007bff;',
       '  border: none;',
@@ -36,29 +47,43 @@
       '}',
       '.' + BUTTON_CLASS + '.copied {',
       '  background: #28a745;',
-      '}',
-      '.hermes-agent-note {',
-      '  position: relative;',
       '}'
     ].join('\n');
     document.head.appendChild(style);
   }
 
-  function getNoteText(noteDiv) {
-    // Extract the main text content (first <div> child, before <hr>)
-    var divs = noteDiv.querySelectorAll('div');
+  /**
+   * Extract the proposal text: the first <div> inside .hermes-agent-note
+   * (or inside .thread-body as fallback) that is not the warnings/metadata
+   * block. Those blocks are siblings introduced by <hr>, so the first
+   * child div of the note wrapper is the proposal itself.
+   */
+  function getProposalText(entryEl) {
+    var root = entryEl.querySelector('.hermes-agent-note')
+           || entryEl.querySelector('.thread-body')
+           || entryEl;
+    var divs = root.querySelectorAll('div');
     for (var i = 0; i < divs.length; i++) {
       var d = divs[i];
-      // Skip if it contains <hr> or <pre> (those are warnings/metadata)
+      // Skip warnings (<hr>+<p>+<ul>) and metadata (<pre>) containers
       if (d.querySelector('hr') || d.querySelector('pre')) continue;
-      return d.textContent.trim();
+      var t = d.textContent.trim();
+      if (t) return t;
     }
-    // Fallback: entire note text
-    return noteDiv.textContent.trim();
+    return root.textContent.trim();
   }
 
-  function addCopyButton(noteDiv) {
-    if (noteDiv.querySelector('.' + BUTTON_CLASS)) return; // already has button
+  function isHermesEntry(entryEl) {
+    if (entryEl.querySelector('.hermes-agent-note')) return true;
+    var title = entryEl.querySelector('.header .title, header .title');
+    return !!(title && TITLE_RE.test(title.textContent));
+  }
+
+  function addCopyButton(entryEl) {
+    if (entryEl.classList.contains(MARKER_CLASS)) return;
+    var header = entryEl.querySelector('.header, header');
+    if (!header) return;
+    entryEl.classList.add(MARKER_CLASS);
 
     var btn = document.createElement('button');
     btn.type = 'button';
@@ -67,17 +92,11 @@
     btn.addEventListener('click', function (e) {
       e.preventDefault();
       e.stopPropagation();
-      var text = getNoteText(noteDiv);
+      var text = getProposalText(entryEl);
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(function () {
-          btn.textContent = BUTTON_DONE;
-          btn.classList.add('copied');
-          setTimeout(function () {
-            btn.textContent = BUTTON_LABEL;
-            btn.classList.remove('copied');
-          }, 2000);
+          flashCopied(btn);
         }).catch(function () {
-          // Fallback: textarea + execCommand
           fallbackCopy(text, btn);
         });
       } else {
@@ -85,7 +104,18 @@
       }
     });
 
-    noteDiv.insertBefore(btn, noteDiv.firstChild);
+    // First child of the header + float:right => lands in the header
+    // action area, just left of the dropdown caret.
+    header.insertBefore(btn, header.firstChild);
+  }
+
+  function flashCopied(btn) {
+    btn.textContent = BUTTON_DONE;
+    btn.classList.add('copied');
+    setTimeout(function () {
+      btn.textContent = BUTTON_LABEL;
+      btn.classList.remove('copied');
+    }, 2000);
   }
 
   function fallbackCopy(text, btn) {
@@ -97,40 +127,40 @@
     ta.select();
     try { document.execCommand('copy'); } catch (e) {}
     document.body.removeChild(ta);
-    btn.textContent = BUTTON_DONE;
-    btn.classList.add('copied');
-    setTimeout(function () {
-      btn.textContent = BUTTON_LABEL;
-      btn.classList.remove('copied');
-    }, 2000);
+    flashCopied(btn);
   }
 
-  function scanForNotes(root) {
-    var notes = (root || document).querySelectorAll('.hermes-agent-note');
-    for (var i = 0; i < notes.length; i++) {
-      addCopyButton(notes[i]);
+  function scanForEntries(root) {
+    // Only .thread-entry elements can be Hermes notes in the SCP thread
+    var entries = (root || document).querySelectorAll('.thread-entry');
+    for (var i = 0; i < entries.length; i++) {
+      if (isHermesEntry(entries[i])) addCopyButton(entries[i]);
+    }
+    // Safety net: a .hermes-agent-note outside any .thread-entry
+    var orphans = (root || document).querySelectorAll('.hermes-agent-note');
+    for (var j = 0; j < orphans.length; j++) {
+      var o = orphans[j];
+      var entry = o.closest ? o.closest('.thread-entry') : null;
+      addCopyButton(entry && entry.classList ? entry : o);
     }
   }
 
   // Scan on DOM ready
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { scanForNotes(); });
+    document.addEventListener('DOMContentLoaded', function () { scanForEntries(); });
   } else {
-    scanForNotes();
+    scanForEntries();
   }
 
-  // Watch for dynamically inserted notes (AJAX thread loads, ticket view refresh)
+  // Watch for dynamically inserted notes (AJAX thread loads, ticket view
+  // refresh, PJAX navigation between tickets)
   if (typeof MutationObserver !== 'undefined') {
     var observer = new MutationObserver(function (mutations) {
       for (var i = 0; i < mutations.length; i++) {
         for (var j = 0; j < mutations[i].addedNodes.length; j++) {
           var node = mutations[i].addedNodes[j];
           if (node.nodeType !== 1) continue;
-          if (node.classList && node.classList.contains('hermes-agent-note')) {
-            addCopyButton(node);
-          } else if (node.querySelectorAll) {
-            scanForNotes(node);
-          }
+          scanForEntries(node);
         }
       }
     });
