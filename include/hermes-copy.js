@@ -53,6 +53,23 @@
   }
 
   /**
+   * textContent drops <br> entirely (no character at all), so line breaks
+   * written by the LLM would vanish on paste. Convert each <br> to a real
+   * newline first, then drop the stray spaces HTML Purifier leaves around
+   * the breaks ("texte<br> <br>texte" → "texte\n\ntexte").
+   */
+  function textWithBreaks(el) {
+    var clone = el.cloneNode(true);
+    var brs = clone.querySelectorAll('br');
+    for (var i = 0; i < brs.length; i++) {
+      brs[i].parentNode.replaceChild(document.createTextNode('\n'), brs[i]);
+    }
+    return clone.textContent
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n[ \t]+/g, '\n');
+  }
+
+  /**
    * Extract the proposal text: the first <div> inside .hermes-agent-note
    * (or inside .thread-body as fallback) that is not the warnings/metadata
    * block. Those blocks are siblings introduced by <hr>, so the first
@@ -67,10 +84,10 @@
       var d = divs[i];
       // Skip warnings (<hr>+<p>+<ul>) and metadata (<pre>) containers
       if (d.querySelector('hr') || d.querySelector('pre')) continue;
-      var t = d.textContent.trim();
+      var t = textWithBreaks(d).trim();
       if (t) return t;
     }
-    return root.textContent.trim();
+    return textWithBreaks(root).trim();
   }
 
   function isHermesEntry(entryEl) {
