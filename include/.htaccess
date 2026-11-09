@@ -1,0 +1,13 @@
+# osTicket's include/.htaccess contains "Deny from all" which blocks ALL
+# direct web access under include/ — including plugin static assets.
+# The plugin injects a <script src="include/plugins/<name>/hermes-copy.js">
+# via addExtraHeader in the SCP; without this exception Apache answers 403
+# (AH01797, mod_access_compat) and the copy button never loads.
+#
+# Re-grant access to the static JS ONLY — never expose PHP files.
+# Same syntax family as the parent (access_compat) so the deeper section
+# properly overrides the parent's Deny.
+<Files "hermes-copy.js">
+    Order allow,deny
+    Allow from all
+</Files>
