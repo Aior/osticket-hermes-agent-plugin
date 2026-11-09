@@ -147,7 +147,12 @@ class TicketWebhookPlugin extends Plugin {
             return;
 
         $pluginName = basename(dirname($pluginDir));
-        $src = ROOT_PATH . 'include/plugins/' . $pluginName . '/hermes-copy.js';
+        // __FILE__ lives in <plugin>/include/ — the URL must include that
+        // segment too, otherwise the browser requests <plugin>/hermes-copy.js
+        // which does not exist (the include/.htaccess exception targets
+        // <plugin>/include/).
+        $src = ROOT_PATH . 'include/plugins/' . $pluginName
+             . '/include/hermes-copy.js';
         echo '<script type="text/javascript" src="'
             . htmlspecialchars($src) . '"></script>' . "\n";
     }
