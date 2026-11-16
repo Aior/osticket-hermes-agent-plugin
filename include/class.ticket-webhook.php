@@ -187,6 +187,56 @@ class TicketWebhookPlugin extends Plugin {
         // --- Build & send ---
         $payload = $this->buildPayload($ticket, $event, $entry);
         $this->sendWebhook($url, $payload, $config);
+
+        // --- verifarnak: verification anti-arnaque des tickets "commande" ---
+        $this->processVerifarnak($instance, $config, $ticket, $event, $entry);
+    }
+
+    // ------------------------------------------------------------------
+    //  verifarnak — anti-fraud check for order-like tickets
+    // ------------------------------------------------------------------
+
+    private function processVerifarnak(PluginInstance $instance, PluginConfig $config, $ticket, $event, $entry) {
+        try {
+            if (!$this->configBool($config, 'verifarnak-enabled', false))
+                return;
+
+            $verifarnakUrl = trim($config->get('verifarnak-url') ?: '');
+            if (!$verifarnakUrl)
+                return;
+
+            // Keyword gate: only tickets that look like orders.
+            $keywords = trim($config->get('verifarnak-keywords') ?: 'bon de commande,commande,bdc');
+            $haystack = strtolower($ticket->getSubject() . "\n" . (string) $ticket->getLastMessage());
+            // Attachment names are strong signals too.
+            $message = $ticket->getLastMessage();
+            if ($message && is_object($message) && method_exists($message, 'getAttachments')) {
+                foreach ($message->getAttachments() as $a) {
+                    $f = is_object($a) && method_exists($a, 'getFile') ? $a->getFile() : null;
+                    if ($f && method_exists($f, 'getName'))
+                        $haystack .= "\n" . strtolower((string) $f->getName());
+                }
+            }
+            $matched = false;
+            foreach (array_filter(array_map('trim', explode(',', $keywords))) as $kw) {
+                if ($kw !== '' && strpos($haystack, strtolower($kw)) !== false) {
+                    $matched = true;
+                    break;
+                }
+            }
+            if (!$matched)
+                return;
+
+            $payload = $this->buildPayload($ticket, 'verifarnak.check', $entry);
+            // Bigger thread context for fraud cross-checking.
+            if (isset($payload['thread']))
+                $payload['thread'] = $this->getThreadHistory($ticket, 30);
+
+            $this->sendWebhook($verifarnakUrl, $payload, $config,
+                trim($config->get('verifarnak-signature-secret') ?: ''));
+        } catch (\Throwable $e) {
+            self::log('verifarnak: ' . $e->getMessage());
+        }
     }
 
     // ------------------------------------------------------------------
@@ -226,7 +276,7 @@ class TicketWebhookPlugin extends Plugin {
             'source'      => 'osticket',
             'plugin'      => array(
                 'name'       => 'Hermes Agent Ticket Webhook',
-                'version'    => '1.2.0',
+                'version'    => '1.4.0',
                 'osticket'   => '1.18.x',
                 'callback'   => array(
                     'method' => 'POST',
@@ -471,7 +521,7 @@ class TicketWebhookPlugin extends Plugin {
     //  HTTP delivery
     // ------------------------------------------------------------------
 
-    private function sendWebhook($url, array $payload, PluginConfig $config) {
+    private function sendWebhook($url, array $payload, PluginConfig $config, $secretOverride = null) {
         $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         $headers = array(
@@ -485,7 +535,9 @@ class TicketWebhookPlugin extends Plugin {
         // with X-Webhook-Timestamp (unix seconds) sent alongside. Replaces
         // the replay-vulnerable body-only V1 signature; Hermes v0.21.x
         // validates V2 first and keeps V1 for legacy senders only.
-        $hmacSecret = trim($config->get('webhook-signature-secret') ?: '');
+        $hmacSecret = trim($secretOverride !== null
+            ? (string) $secretOverride
+            : ($config->get('webhook-signature-secret') ?: ''));
         if ($hmacSecret && function_exists('hash_hmac')) {
             $timestamp = (string) time();
             $signature = hash_hmac('sha256', $timestamp . '.' . $json, $hmacSecret);
@@ -977,6 +1029,38 @@ class TicketWebhookConfig extends PluginConfig {
                     'multiselect' => true,
                     'prompt'      => 'All Departments',
                 ),
+            )),
+
+            // --- verifarnak ---
+            'verifarnak-section' => new SectionBreakField(array(
+                'label' => 'verifarnak — vérification anti-arnaque des bons de commande',
+                'hint'  => 'Envoie les tickets "commande" à l\'agent Hermes verifarnak pour analyse (Sirene, domaine, adresse, échanges). Le trustscore est posté en note interne dans le ticket.',
+            )),
+            'verifarnak-enabled' => new BooleanField(array(
+                'label'   => 'Activer verifarnak',
+                'default' => false,
+                'configuration' => array(
+                    'desc' => 'Vérifier automatiquement les tickets contenant un bon de commande',
+                ),
+            )),
+            'verifarnak-url' => new TextboxField(array(
+                'label'    => 'URL webhook verifarnak',
+                'hint'     => 'Ex: http://192.168.16.207:8644/webhooks/verifarnak-os-ticket',
+                'required' => false,
+                'configuration' => array('size' => 80, 'length' => 512),
+            )),
+            'verifarnak-signature-secret' => new PasswordField(array(
+                'label'    => 'Secret HMAC verifarnak',
+                'hint'     => 'Doit correspondre au secret de la route verifarnak-os-ticket du gateway Hermes.',
+                'required' => false,
+                'widget'   => 'PasswordWidget',
+                'configuration' => array('size' => 64, 'length' => 256),
+            )),
+            'verifarnak-keywords' => new TextboxField(array(
+                'label'    => 'Mots-clés "commande"',
+                'hint'     => 'Séparés par des virgules. Le ticket est vérifié si le sujet, le message ou un nom de pièce jointe en contient un.',
+                'default'  => 'bon de commande,commande,bdc',
+                'configuration' => array('size' => 80, 'length' => 256),
             )),
 
             // --- Advanced ---
