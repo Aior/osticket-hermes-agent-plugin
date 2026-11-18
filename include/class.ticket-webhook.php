@@ -276,7 +276,7 @@ class TicketWebhookPlugin extends Plugin {
             'source'      => 'osticket',
             'plugin'      => array(
                 'name'       => 'Hermes Agent Ticket Webhook',
-                'version'    => '1.4.0',
+                'version'    => '1.4.1',
                 'osticket'   => '1.18.x',
                 'callback'   => array(
                     'method' => 'POST',
@@ -690,7 +690,10 @@ class TicketWebhookPlugin extends Plugin {
         if (!$note)
             return $this->jsonResponse(400, array('ok' => false, 'error' => 'missing_note'));
 
-        $poster = trim($config->get('note-poster') ?: 'Hermes Agent');
+        // PATCH verifarnak: le gateway peut imposer le poster (ex: "IA Verifarnak")
+        $poster = trim($data['poster'] ?? '');
+        if ($poster === '')
+            $poster = trim($config->get('note-poster') ?: 'Hermes Agent');
         $errors = array();
         $entry = $ticket->postNote(array(
             'title' => $title,
